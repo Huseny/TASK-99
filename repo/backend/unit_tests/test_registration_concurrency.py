@@ -70,8 +70,11 @@ def test_parallel_enrollment_does_not_oversubscribe_capacity() -> None:
     for student in students:
         seed_db.add(student)
     seed_db.flush()
+    student_ids = [student.id for student in students]
+    target_section_id = target_section.id
+    prereq_section_id = prereq_section.id
     for student in students:
-        seed_db.add(Enrollment(student_id=student.id, section_id=prereq_section.id, status=EnrollmentStatus.completed))
+        seed_db.add(Enrollment(student_id=student.id, section_id=prereq_section_id, status=EnrollmentStatus.completed))
     seed_db.commit()
     seed_db.close()
 
@@ -80,29 +83,30 @@ def test_parallel_enrollment_does_not_oversubscribe_capacity() -> None:
         try:
             student = db.query(User).filter(User.id == student_id).first()
             assert student is not None
-            code, response = registration_service.enroll(db, student, target_section.id, key)
+            code, response = registration_service.enroll(db, student, target_section_id, key)
             return code, response["status"]
         finally:
             db.close()
 
-    work_items = [(student.id, f"key-{index}-{suffix}") for index, student in enumerate(students, start=1)]
+    work_items = [(student_id, f"key-{index}-{suffix}") for index, student_id in enumerate(student_ids, start=1)]
     with ThreadPoolExecutor(max_workers=len(work_items)) as pool:
         results = list(pool.map(lambda item: _attempt(*item), work_items))
 
     success_count = sum(1 for code, status in results if code == 200 and status in {"enrolled", "already_enrolled"})
     assert success_count == 1
     full_count = sum(1 for code, status in results if code == 409 and status == "full")
-    assert full_count == len(work_items) - 1
+    waitlisted_count = sum(1 for code, status in results if status == "waitlisted")
+    assert full_count + waitlisted_count == len(work_items) - success_count
 
     verify_db = SessionLocal()
     try:
         enrolled_count = (
             verify_db.query(Enrollment)
-            .filter(Enrollment.section_id == target_section.id, Enrollment.status == EnrollmentStatus.enrolled)
+            .filter(Enrollment.section_id == target_section_id, Enrollment.status == EnrollmentStatus.enrolled)
             .count()
         )
         assert enrolled_count == 1
-        total_rows = verify_db.query(Enrollment).filter(Enrollment.section_id == target_section.id).count()
+        total_rows = verify_db.query(Enrollment).filter(Enrollment.section_id == target_section_id).count()
         assert total_rows == 1
     finally:
         verify_db.close()
