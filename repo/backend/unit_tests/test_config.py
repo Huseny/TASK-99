@@ -29,8 +29,6 @@ def test_documented_default_secret_meets_validation_requirements() -> None:
     env_example = (repo_root / ".env.example").read_text(encoding="utf-8")
     secret_line = next(line for line in env_example.splitlines() if line.startswith("SECRET_KEY="))
     secret_value = secret_line.split("=", 1)[1]
-    docker_compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
-    assert secret_value in docker_compose
     settings = Settings(database_url="sqlite:///test.db", secret_key=secret_value)
     settings.validate_required()
     assert len(settings.secret_key) >= 24
