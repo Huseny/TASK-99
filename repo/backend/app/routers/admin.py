@@ -27,7 +27,7 @@ from app.schemas.admin import (
     UserOut,
     UserUpdateIn,
 )
-from app.services import audit_retention_service, data_quality_service
+from app.services import audit_retention_service, auth_service, data_quality_service
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -388,7 +388,8 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depen
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
     before = _to_dict(user, ["id", "username", "is_active", "org_id", "reports_to"])
-    db.query(SessionToken).filter(SessionToken.user_id == user.id, SessionToken.revoked.is_(False)).update({"revoked": True, "revoked_at": datetime.now(timezone.utc)})
+    auth_service.revoke_user_sessions(db, user.id, commit=False)
+    db.query(SessionToken).filter(SessionToken.user_id == user.id).delete(synchronize_session=False)
     db.delete(user)
     write_audit_log(db, actor_id=admin.id, action="user.delete", entity_name="User", entity_id=user_id, before=before, after=None)
     db.commit()
@@ -415,9 +416,7 @@ def update_user(user_id: int, payload: UserUpdateIn, db: Session = Depends(get_d
     for key, value in data.items():
         setattr(user, key, value)
     if payload.is_active is False:
-        db.query(SessionToken).filter(SessionToken.user_id == user.id, SessionToken.revoked.is_(False)).update(
-            {"revoked": True, "revoked_at": datetime.now(timezone.utc)}
-        )
+        auth_service.revoke_user_sessions(db, user.id, commit=False)
     data_quality_service.flush_or_raise_conflict(db, detail="Duplicate user detected.")
     after = _to_dict(user, ["id", "username", "is_active", "org_id", "reports_to"])
     write_audit_log(db, actor_id=admin.id, action="user.update", entity_name="User", entity_id=user.id, before=before, after=after)

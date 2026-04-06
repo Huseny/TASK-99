@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.security import hash_password
 from app.models.access import ScopeGrant, ScopeType
 from app.models.admin import AuditLog, Course, Organization, RegistrationRound, Section, Term
-from app.models.registration import AddDropRequest, Enrollment, EnrollmentStatus
+from app.models.registration import AddDropRequest, Enrollment, EnrollmentStatus, RegistrationHistory, WaitlistEntry
 from app.models.user import User, UserRole
 
 
@@ -153,6 +153,16 @@ def test_waitlist_drop_backfill_status_history(client, db_session: Session) -> N
     history_b = client.get("/api/v1/registration/history", headers=headers_b)
     assert history_b.status_code == 200
     assert len(history_b.json()) > 0
+    assert any(item["event_type"] == "WAITLIST_BACKFILLED" and item["section_id"] == target_section_id for item in history_b.json())
+    assert db_session.query(WaitlistEntry).filter(WaitlistEntry.student_id == student_b.id, WaitlistEntry.section_id == target_section_id).first() is None
+    drop_history = (
+        db_session.query(RegistrationHistory)
+        .filter(RegistrationHistory.student_id == student_a.id, RegistrationHistory.section_id == target_section_id)
+        .order_by(RegistrationHistory.id.desc())
+        .first()
+    )
+    assert drop_history is not None
+    assert drop_history.event_type == "DROPPED"
 
 
 def test_idempotency_key_expires_after_24h(client, db_session: Session) -> None:

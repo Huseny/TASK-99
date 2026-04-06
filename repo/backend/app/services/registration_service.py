@@ -152,7 +152,7 @@ def _current_enrolled_count(db: Session, section_id: int) -> int:
 
 
 def _consume_waitlist_if_seat_available(db: Session, section_id: int) -> None:
-    section = db.query(Section).filter(Section.id == section_id).first()
+    section = _get_locked_section(db, section_id)
     if section is None:
         return
     while _current_enrolled_count(db, section_id) < section.capacity:
@@ -171,6 +171,7 @@ def _consume_waitlist_if_seat_available(db: Session, section_id: int) -> None:
             enrollment.status = EnrollmentStatus.enrolled
         _record_history(db, next_wait.student_id, section_id, "WAITLIST_BACKFILLED", "Auto promoted from waitlist")
         db.delete(next_wait)
+        db.flush()
 
 
 def _get_locked_section(db: Session, section_id: int) -> Section:
@@ -264,6 +265,7 @@ def drop(db: Session, student: User, section_id: int, idempotency_key: str) -> t
             raise HTTPException(status_code=409, detail="Idempotency key conflict for different request payload.")
         return existing_request.response_code, json.loads(existing_request.response_body)
 
+    _get_locked_section(db, section_id)
     enrollment = (
         db.query(Enrollment)
         .filter(Enrollment.student_id == student.id, Enrollment.section_id == section_id, Enrollment.status == EnrollmentStatus.enrolled)

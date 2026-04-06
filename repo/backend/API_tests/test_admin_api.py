@@ -170,10 +170,13 @@ def test_user_deactivation_revokes_sessions(client, db_session: Session) -> None
     deactivate = client.put(f"/api/v1/admin/users/{reviewer_id}", json={"is_active": False}, headers=admin_headers)
     assert deactivate.status_code == 200
     db_session.expire_all()
-    revoked_session = db_session.query(SessionToken).filter(SessionToken.user_id == reviewer_id).first()
+    revoked_sessions = db_session.query(SessionToken).filter(SessionToken.user_id == reviewer_id).all()
+    assert revoked_sessions
+    revoked_session = revoked_sessions[0]
     assert revoked_session is not None
     assert revoked_session.revoked is True
     assert revoked_session.revoked_at is not None
+    assert all(session.revoked and session.revoked_at is not None for session in revoked_sessions)
 
     me = client.get("/api/v1/auth/me", headers=reviewer_headers)
     assert me.status_code == 401

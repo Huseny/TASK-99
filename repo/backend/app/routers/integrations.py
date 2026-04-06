@@ -1,6 +1,7 @@
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.core.audit import write_audit_log
@@ -58,31 +59,45 @@ def _auth_integration(request: Request, db: Session):
     return integration_service.authenticate_integration_request(db, request, body)
 
 
+def _validate_payload(model_cls, body: bytes):
+    try:
+        return model_cls(**integration_service.parse_json_body(body))
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail={"message": "Invalid integration payload.", "errors": exc.errors()}) from exc
+
+
 @router.post("/sis/students")
 async def sis_students_sync(request: Request, db: Session = Depends(get_db)):
     body = await request.body()
     request.scope["_cached_body"] = body
     client = _auth_integration(request, db)
-    payload = SISStudentsSyncIn(**integration_service.parse_json_body(body))
-    result = integration_service.sync_students(
-        db,
-        client=client,
-        import_id=payload.import_id,
-        body=body,
-        students=[item.model_dump() for item in payload.students],
-    )
-    write_audit_log(
-        db,
-        actor_id=integration_service.ensure_client_actor(db, client),
-        action="integrations.sis.students.sync",
-        entity_name="IntegrationClient",
-        entity_id=client.id,
-        before=None,
-        after={"client_id": client.client_id, **result},
-        metadata={"client_id": client.client_id, "timestamp": integration_service._utcnow().isoformat(), "action_type": "sync"},
-    )
-    db.commit()
-    return result
+    try:
+        payload = _validate_payload(SISStudentsSyncIn, body)
+        result = integration_service.sync_students(
+            db,
+            client=client,
+            import_id=payload.import_id,
+            body=body,
+            students=[item.model_dump() for item in payload.students],
+        )
+        write_audit_log(
+            db,
+            actor_id=integration_service.ensure_client_actor(db, client),
+            action="integrations.sis.students.sync",
+            entity_name="IntegrationClient",
+            entity_id=client.id,
+            before=None,
+            after={"client_id": client.client_id, **result},
+            metadata={"client_id": client.client_id, "timestamp": integration_service._utcnow().isoformat(), "action_type": "sync"},
+        )
+        db.commit()
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/qbank/forms")
@@ -90,23 +105,30 @@ async def qbank_forms_import(request: Request, db: Session = Depends(get_db)):
     body = await request.body()
     request.scope["_cached_body"] = body
     client = _auth_integration(request, db)
-    payload = QbankFormsImportIn(**integration_service.parse_json_body(body))
-    result = integration_service.import_forms(
-        db,
-        client=client,
-        import_id=payload.import_id,
-        body=body,
-        forms=[item.model_dump() for item in payload.forms],
-    )
-    write_audit_log(
-        db,
-        actor_id=integration_service.ensure_client_actor(db, client),
-        action="integrations.qbank.forms.import",
-        entity_name="IntegrationClient",
-        entity_id=client.id,
-        before=None,
-        after={"client_id": client.client_id, **result},
-        metadata={"client_id": client.client_id, "timestamp": integration_service._utcnow().isoformat(), "action_type": "import"},
-    )
-    db.commit()
-    return result
+    try:
+        payload = _validate_payload(QbankFormsImportIn, body)
+        result = integration_service.import_forms(
+            db,
+            client=client,
+            import_id=payload.import_id,
+            body=body,
+            forms=[item.model_dump() for item in payload.forms],
+        )
+        write_audit_log(
+            db,
+            actor_id=integration_service.ensure_client_actor(db, client),
+            action="integrations.qbank.forms.import",
+            entity_name="IntegrationClient",
+            entity_id=client.id,
+            before=None,
+            after={"client_id": client.client_id, **result},
+            metadata={"client_id": client.client_id, "timestamp": integration_service._utcnow().isoformat(), "action_type": "import"},
+        )
+        db.commit()
+        return result
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise

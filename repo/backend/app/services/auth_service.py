@@ -84,6 +84,20 @@ def revoke_session(db: Session, session: SessionToken, *, at: datetime | None = 
         db.commit()
 
 
+def revoke_user_sessions(db: Session, user_id: int, *, at: datetime | None = None, commit: bool = True) -> int:
+    revoked_at = at or _utcnow()
+    count = (
+        db.query(SessionToken)
+        .filter(SessionToken.user_id == user_id, SessionToken.revoked.is_(False))
+        .update({"revoked": True, "revoked_at": revoked_at}, synchronize_session=False)
+    )
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return int(count or 0)
+
+
 def logout(db: Session, session: SessionToken) -> None:
     if not session.revoked:
         revoke_session(db, session)

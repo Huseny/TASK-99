@@ -91,6 +91,8 @@ def test_sis_sync_persists_users_and_is_idempotent(client, db_session: Session) 
     assert replay.status_code == 200
     assert replay.json()["created"] == 2
 
+    db_session.expire_all()
+    assert db_session.query(User).filter(User.source_client_id == client_id).count() == 2
     import_rows = (
         db_session.query(IntegrationImport)
         .filter(IntegrationImport.client_id == client_id, IntegrationImport.import_type == "sis.students")
@@ -144,6 +146,7 @@ def test_integration_invalid_payload_and_partial_failure_rolls_back(client, db_s
     invalid_schema_body = json.dumps(invalid_schema_payload).encode("utf-8")
     invalid_schema = client.post(path, data=invalid_schema_body, headers=_signed_headers(secret, client_id, path, invalid_schema_body, "rbnonce-1"))
     assert invalid_schema.status_code == 422
+    assert db_session.query(IntegrationImport).filter(IntegrationImport.client_id == client_id, IntegrationImport.import_id == "bad-1").count() == 0
 
     rollback_payload = {
         "import_id": "rollback-1",
@@ -156,8 +159,10 @@ def test_integration_invalid_payload_and_partial_failure_rolls_back(client, db_s
     rollback = client.post(path, data=rollback_body, headers=_signed_headers(secret, client_id, path, rollback_body, "rbnonce-2"))
     assert rollback.status_code == 409
 
+    db_session.expire_all()
     persisted = db_session.query(User).filter(User.source_client_id == client_id).all()
     assert persisted == []
+    assert db_session.query(IntegrationImport).filter(IntegrationImport.client_id == client_id, IntegrationImport.import_id == "rollback-1").count() == 0
 
 
 def test_malformed_json_returns_422(client, db_session: Session) -> None:
