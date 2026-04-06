@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -29,6 +29,7 @@ class Term(Base):
 
 class Course(Base):
     __tablename__ = "courses"
+    __table_args__ = (UniqueConstraint("organization_id", "code", name="uq_courses_org_code"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id"), nullable=False)
@@ -40,6 +41,7 @@ class Course(Base):
 
 class Section(Base):
     __tablename__ = "sections"
+    __table_args__ = (UniqueConstraint("term_id", "code", name="uq_sections_term_code"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id"), nullable=False)
@@ -64,7 +66,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    actor_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     action: Mapped[str] = mapped_column(String(120), nullable=False)
     entity_name: Mapped[str] = mapped_column(String(120), nullable=False)
     entity_id: Mapped[int] = mapped_column(Integer, nullable=True)
@@ -79,7 +81,7 @@ class AuditLogArchive(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     original_audit_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True, index=True)
-    actor_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    actor_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     action: Mapped[str] = mapped_column(String(120), nullable=False)
     entity_name: Mapped[str] = mapped_column(String(120), nullable=False)
     entity_id: Mapped[int] = mapped_column(Integer, nullable=True)

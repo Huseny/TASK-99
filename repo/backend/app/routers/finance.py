@@ -16,6 +16,7 @@ from app.schemas.finance import (
     PaymentIn,
     PrepaymentIn,
     ReconciliationImportOut,
+    ReconciliationLineOut,
     RefundIn,
 )
 from app.services import data_quality_service, finance_service
@@ -58,6 +59,7 @@ def get_account(student_id: int, db: Session = Depends(get_db), user: User = Dep
                 entry_type=e.entry_type.value,
                 amount=e.amount,
                 instrument=e.instrument.value if e.instrument else None,
+                external_reference_id=e.external_reference_id,
                 reference_entry_id=e.reference_entry_id,
                 description=e.description,
                 entry_date=e.entry_date,
@@ -78,6 +80,7 @@ def post_payment(payload: PaymentIn, db: Session = Depends(get_db), user: User =
         student_id=payload.student_id,
         amount=payload.amount,
         instrument=payload.instrument,
+        reference_id=payload.reference_id,
         description=payload.description,
         entry_date=payload.entry_date,
     )
@@ -100,6 +103,7 @@ def post_payment(payload: PaymentIn, db: Session = Depends(get_db), user: User =
         entry_type=entry.entry_type.value,
         amount=entry.amount,
         instrument=entry.instrument.value if entry.instrument else None,
+        external_reference_id=entry.external_reference_id,
         reference_entry_id=entry.reference_entry_id,
         description=entry.description,
         entry_date=entry.entry_date,
@@ -117,6 +121,7 @@ def post_prepayment(payload: PrepaymentIn, db: Session = Depends(get_db), user: 
         student_id=payload.student_id,
         amount=payload.amount,
         instrument=payload.instrument,
+        reference_id=payload.reference_id,
         description=payload.description,
         entry_date=payload.entry_date,
     )
@@ -139,6 +144,7 @@ def post_prepayment(payload: PrepaymentIn, db: Session = Depends(get_db), user: 
         entry_type=entry.entry_type.value,
         amount=entry.amount,
         instrument=entry.instrument.value if entry.instrument else None,
+        external_reference_id=entry.external_reference_id,
         reference_entry_id=entry.reference_entry_id,
         description=entry.description,
         entry_date=entry.entry_date,
@@ -156,6 +162,7 @@ def post_deposit(payload: DepositIn, db: Session = Depends(get_db), user: User =
         student_id=payload.student_id,
         amount=payload.amount,
         instrument=payload.instrument,
+        reference_id=payload.reference_id,
         description=payload.description,
         entry_date=payload.entry_date,
     )
@@ -178,6 +185,7 @@ def post_deposit(payload: DepositIn, db: Session = Depends(get_db), user: User =
         entry_type=entry.entry_type.value,
         amount=entry.amount,
         instrument=entry.instrument.value if entry.instrument else None,
+        external_reference_id=entry.external_reference_id,
         reference_entry_id=entry.reference_entry_id,
         description=entry.description,
         entry_date=entry.entry_date,
@@ -217,6 +225,7 @@ def post_refund(payload: RefundIn, db: Session = Depends(get_db), user: User = D
         entry_type=entry.entry_type.value,
         amount=entry.amount,
         instrument=entry.instrument.value if entry.instrument else None,
+        external_reference_id=entry.external_reference_id,
         reference_entry_id=entry.reference_entry_id,
         description=entry.description,
         entry_date=entry.entry_date,
@@ -255,6 +264,7 @@ def post_month_end_billing(payload: MonthEndBillingIn, db: Session = Depends(get
         entry_type=entry.entry_type.value,
         amount=entry.amount,
         instrument=entry.instrument.value if entry.instrument else None,
+        external_reference_id=entry.external_reference_id,
         reference_entry_id=entry.reference_entry_id,
         description=entry.description,
         entry_date=entry.entry_date,
@@ -294,7 +304,7 @@ async def import_reconciliation(
         logger.info("finance_reconciliation_invalid_file", extra={"event": "finance.reconciliation.invalid_file"})
         raise HTTPException(status_code=422, detail="Only CSV files are supported.")
     content = await file.read()
-    report = finance_service.import_reconciliation_csv(db, content.decode("utf-8"))
+    report = finance_service.import_reconciliation_csv(db, content.decode("utf-8"), actor=user)
     write_audit_log(
         db,
         actor_id=user.id,
@@ -316,11 +326,36 @@ async def import_reconciliation(
         import_id=report.import_id,
         matched_total=report.matched_total,
         unmatched_total=report.unmatched_total,
+        statement_total=report.statement_total,
+        ledger_total=report.ledger_total,
+        variance_total=report.variance_total,
     )
 
 
 @router.get("/reconciliation/{import_id}/report", response_model=ReconciliationImportOut)
 def get_reconciliation(import_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_finance_or_admin(user)
-    report = finance_service.get_reconciliation_report(db, import_id)
-    return ReconciliationImportOut(import_id=report.import_id, matched_total=report.matched_total, unmatched_total=report.unmatched_total)
+    report = finance_service.get_reconciliation_report(db, import_id, actor=user)
+    lines = finance_service.get_reconciliation_lines(db, import_id)
+    return ReconciliationImportOut(
+        import_id=report.import_id,
+        matched_total=report.matched_total,
+        unmatched_total=report.unmatched_total,
+        statement_total=report.statement_total,
+        ledger_total=report.ledger_total,
+        variance_total=report.variance_total,
+        lines=[
+            ReconciliationLineOut(
+                line_number=line.line_number,
+                student_id=line.student_id,
+                amount=line.amount,
+                reference_id=line.reference_id,
+                payment_method=line.payment_method,
+                statement_date=line.statement_date,
+                matched=line.matched,
+                matched_entry_id=line.matched_entry_id,
+                explanation=line.explanation,
+            )
+            for line in lines
+        ],
+    )

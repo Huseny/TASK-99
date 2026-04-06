@@ -49,3 +49,17 @@ class HistoryItem(BaseModel):
     event_type: str
     details: str | None
     created_at: datetime
+
+
+class RosterItem(BaseModel):
+    student_id: int
+    username: str
+    status: str
+
+
+class RosterAddRequest(BaseModel):
+    student_id: int
+
+
+class RosterRemoveRequest(BaseModel):
+    student_id: int

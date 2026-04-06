@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.security import hash_password, token_hash
 from app.models.user import SessionToken, User, UserRole
 
@@ -51,6 +52,10 @@ def test_me_and_logout(client, db_session: Session) -> None:
 
     logout = client.post("/api/v1/auth/logout", headers=headers)
     assert logout.status_code == 200
+    session = db_session.query(SessionToken).filter(SessionToken.token_hash == token_hash(token)).first()
+    assert session is not None
+    assert session.revoked is True
+    assert session.revoked_at is not None
 
     me_after_logout = client.get("/api/v1/auth/me", headers=headers)
     assert me_after_logout.status_code == 401
@@ -89,3 +94,33 @@ def test_expired_session_rejected(client, db_session: Session) -> None:
 
     response = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {raw_token}"})
     assert response.status_code == 401
+    db_session.refresh(session)
+    assert session.revoked is True
+    assert session.revoked_at is not None
+
+
+def test_admin_bootstrap_flow(client, db_session: Session) -> None:
+    original_token = settings.bootstrap_admin_token
+    settings.bootstrap_admin_token = "bootstrap-secret"
+    try:
+        response = client.post(
+            "/api/v1/auth/bootstrap-admin",
+            json={"username": "bootstrap_admin", "password": "BootstrapPass123!", "bootstrap_token": "bootstrap-secret"},
+        )
+        assert response.status_code == 200
+
+        user = db_session.query(User).filter(User.username == "bootstrap_admin").first()
+        assert user is not None
+        assert user.role == UserRole.admin
+        assert user.password_hash != "BootstrapPass123!"
+
+        login = client.post("/api/v1/auth/login", json={"username": "bootstrap_admin", "password": "BootstrapPass123!"})
+        assert login.status_code == 200
+
+        second = client.post(
+            "/api/v1/auth/bootstrap-admin",
+            json={"username": "bootstrap_admin_2", "password": "BootstrapPass123!", "bootstrap_token": "bootstrap-secret"},
+        )
+        assert second.status_code == 409
+    finally:
+        settings.bootstrap_admin_token = original_token

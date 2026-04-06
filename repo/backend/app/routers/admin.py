@@ -83,7 +83,7 @@ def _enforce_admin_write_quality(entity_type: str, payload: dict, db: Session) -
 def create_organization(payload: OrganizationIn, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     entity = Organization(**payload.model_dump())
     db.add(entity)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate organization detected.")
     write_audit_log(
         db,
         actor_id=admin.id,
@@ -117,7 +117,7 @@ def update_organization(
     before = _to_dict(entity, ["id", "name", "code", "is_active"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate organization detected.")
     after = _to_dict(entity, ["id", "name", "code", "is_active"])
     write_audit_log(
         db,
@@ -156,7 +156,7 @@ def delete_organization(organization_id: int, db: Session = Depends(get_db), adm
 def create_term(payload: TermIn, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     entity = Term(**payload.model_dump())
     db.add(entity)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate term detected.")
     write_audit_log(db, actor_id=admin.id, action="term.create", entity_name="Term", entity_id=entity.id, before=None, after=_to_dict(entity, ["id", "organization_id", "name", "starts_on", "ends_on", "is_active"]))
     db.commit()
     return TermOut(**_to_dict(entity, ["id", "organization_id", "name", "starts_on", "ends_on", "is_active"]))
@@ -176,7 +176,7 @@ def update_term(term_id: int, payload: TermIn, db: Session = Depends(get_db), ad
     before = _to_dict(entity, ["id", "organization_id", "name", "starts_on", "ends_on", "is_active"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate term detected.")
     after = _to_dict(entity, ["id", "organization_id", "name", "starts_on", "ends_on", "is_active"])
     write_audit_log(db, actor_id=admin.id, action="term.update", entity_name="Term", entity_id=entity.id, before=before, after=after)
     db.commit()
@@ -200,7 +200,7 @@ def create_course(payload: CourseIn, db: Session = Depends(get_db), admin: User 
     _enforce_admin_write_quality("AdminCourseWrite", payload.model_dump(), db)
     entity = Course(**payload.model_dump())
     db.add(entity)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate course detected.")
     write_audit_log(db, actor_id=admin.id, action="course.create", entity_name="Course", entity_id=entity.id, before=None, after=_to_dict(entity, ["id", "organization_id", "code", "title", "credits", "prerequisites"]))
     db.commit()
     return CourseOut(**_to_dict(entity, ["id", "organization_id", "code", "title", "credits", "prerequisites"]))
@@ -217,11 +217,11 @@ def update_course(course_id: int, payload: CourseIn, db: Session = Depends(get_d
     entity = db.query(Course).filter(Course.id == course_id).first()
     if entity is None:
         raise HTTPException(status_code=404, detail="Course not found.")
-    _enforce_admin_write_quality("AdminCourseWrite", payload.model_dump(), db)
+    _enforce_admin_write_quality("AdminCourseWrite", {**payload.model_dump(), "existing_entity_id": entity.id}, db)
     before = _to_dict(entity, ["id", "organization_id", "code", "title", "credits", "prerequisites"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate course detected.")
     after = _to_dict(entity, ["id", "organization_id", "code", "title", "credits", "prerequisites"])
     write_audit_log(db, actor_id=admin.id, action="course.update", entity_name="Course", entity_id=entity.id, before=before, after=after)
     db.commit()
@@ -245,7 +245,7 @@ def create_section(payload: SectionIn, db: Session = Depends(get_db), admin: Use
     _enforce_admin_write_quality("AdminSectionWrite", payload.model_dump(), db)
     entity = Section(**payload.model_dump())
     db.add(entity)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate section detected.")
     write_audit_log(db, actor_id=admin.id, action="section.create", entity_name="Section", entity_id=entity.id, before=None, after=_to_dict(entity, ["id", "course_id", "term_id", "code", "instructor_id", "capacity"]))
     db.commit()
     return SectionOut(**_to_dict(entity, ["id", "course_id", "term_id", "code", "instructor_id", "capacity"]))
@@ -262,11 +262,11 @@ def update_section(section_id: int, payload: SectionIn, db: Session = Depends(ge
     entity = db.query(Section).filter(Section.id == section_id).first()
     if entity is None:
         raise HTTPException(status_code=404, detail="Section not found.")
-    _enforce_admin_write_quality("AdminSectionWrite", payload.model_dump(), db)
+    _enforce_admin_write_quality("AdminSectionWrite", {**payload.model_dump(), "existing_entity_id": entity.id}, db)
     before = _to_dict(entity, ["id", "course_id", "term_id", "code", "instructor_id", "capacity"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate section detected.")
     after = _to_dict(entity, ["id", "course_id", "term_id", "code", "instructor_id", "capacity"])
     write_audit_log(db, actor_id=admin.id, action="section.update", entity_name="Section", entity_id=entity.id, before=before, after=after)
     db.commit()
@@ -289,7 +289,7 @@ def delete_section(section_id: int, db: Session = Depends(get_db), admin: User =
 def create_round(payload: RegistrationRoundIn, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     entity = RegistrationRound(**payload.model_dump())
     db.add(entity)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate registration round detected.")
     write_audit_log(db, actor_id=admin.id, action="registration_round.create", entity_name="RegistrationRound", entity_id=entity.id, before=None, after=_to_dict(entity, ["id", "term_id", "name", "starts_at", "ends_at", "is_active"]))
     db.commit()
     return RegistrationRoundOut(**_to_dict(entity, ["id", "term_id", "name", "starts_at", "ends_at", "is_active"]))
@@ -314,7 +314,7 @@ def update_round(
     before = _to_dict(entity, ["id", "term_id", "name", "starts_at", "ends_at", "is_active"])
     for key, value in payload.model_dump().items():
         setattr(entity, key, value)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate registration round detected.")
     after = _to_dict(entity, ["id", "term_id", "name", "starts_at", "ends_at", "is_active"])
     write_audit_log(db, actor_id=admin.id, action="registration_round.update", entity_name="RegistrationRound", entity_id=entity.id, before=before, after=after)
     db.commit()
@@ -353,7 +353,7 @@ def create_user(payload: UserCreateIn, db: Session = Depends(get_db), admin: Use
         reports_to=payload.reports_to,
     )
     db.add(user)
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate user detected.")
     write_audit_log(db, actor_id=admin.id, action="user.create", entity_name="User", entity_id=user.id, before=None, after=_to_dict(user, ["id", "username", "is_active", "org_id", "reports_to"]))
     db.commit()
     return UserOut(
@@ -388,7 +388,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depen
     if user is None:
         raise HTTPException(status_code=404, detail="User not found.")
     before = _to_dict(user, ["id", "username", "is_active", "org_id", "reports_to"])
-    db.query(SessionToken).filter(SessionToken.user_id == user.id, SessionToken.revoked.is_(False)).update({"revoked": True})
+    db.query(SessionToken).filter(SessionToken.user_id == user.id, SessionToken.revoked.is_(False)).update({"revoked": True, "revoked_at": datetime.now(timezone.utc)})
     db.delete(user)
     write_audit_log(db, actor_id=admin.id, action="user.delete", entity_name="User", entity_id=user_id, before=before, after=None)
     db.commit()
@@ -409,15 +409,16 @@ def update_user(user_id: int, payload: UserUpdateIn, db: Session = Depends(get_d
         "role": user.role.value,
         "org_id": data.get("org_id", user.org_id),
         "reports_to": data.get("reports_to", user.reports_to),
+        "existing_entity_id": user.id,
     }
     _enforce_admin_write_quality("AdminUserWrite", dq_payload, db)
     for key, value in data.items():
         setattr(user, key, value)
     if payload.is_active is False:
         db.query(SessionToken).filter(SessionToken.user_id == user.id, SessionToken.revoked.is_(False)).update(
-            {"revoked": True}
+            {"revoked": True, "revoked_at": datetime.now(timezone.utc)}
         )
-    db.flush()
+    data_quality_service.flush_or_raise_conflict(db, detail="Duplicate user detected.")
     after = _to_dict(user, ["id", "username", "is_active", "org_id", "reports_to"])
     write_audit_log(db, actor_id=admin.id, action="user.update", entity_name="User", entity_id=user.id, before=before, after=after)
     db.commit()
@@ -506,7 +507,7 @@ def create_scope_grant(payload: ScopeGrantIn, db: Session = Depends(get_db), adm
     if grant is None:
         grant = ScopeGrant(user_id=payload.user_id, scope_type=scope_type, scope_id=payload.scope_id)
         db.add(grant)
-        db.flush()
+        data_quality_service.flush_or_raise_conflict(db, detail="Duplicate scope grant detected.")
         write_audit_log(
             db,
             actor_id=admin.id,

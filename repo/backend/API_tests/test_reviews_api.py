@@ -8,8 +8,8 @@ from app.models.registration import Enrollment, EnrollmentStatus
 from app.models.user import User, UserRole
 
 
-def _create_user(db: Session, username: str, role: UserRole, password: str) -> User:
-    user = User(username=username, password_hash=hash_password(password), role=role, is_active=True)
+def _create_user(db: Session, username: str, role: UserRole, password: str, org_id: int | None = None) -> User:
+    user = User(username=username, password_hash=hash_password(password), role=role, is_active=True, org_id=org_id)
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -22,7 +22,7 @@ def _login(client, username: str, password: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
-def _seed_round_context(db: Session) -> tuple[int, int]:
+def _seed_round_context(db: Session) -> tuple[int, int, int]:
     organization = Organization(name="Review Org", code="RORG", is_active=True)
     db.add(organization)
     db.flush()
@@ -35,7 +35,7 @@ def _seed_round_context(db: Session) -> tuple[int, int]:
     section = Section(course_id=course.id, term_id=term.id, code="R1", instructor_id=None, capacity=40)
     db.add(section)
     db.commit()
-    return term.id, section.id
+    return organization.id, term.id, section.id
 
 
 def _grant_section_scope(db: Session, user_id: int, section_id: int) -> None:
@@ -53,8 +53,11 @@ def test_review_round_end_to_end(client, db_session: Session) -> None:
     reviewer_1 = _create_user(db_session, "rev1", UserRole.reviewer, "ReviewerPass1!")
     reviewer_2 = _create_user(db_session, "rev2", UserRole.reviewer, "ReviewerPass1!")
     student = _create_user(db_session, "student1", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer_1.id, section_id)
+    _grant_section_scope(db_session, reviewer_2.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
 
     instructor_headers = _login(client, "inst1", "InstructorPass1!")
     reviewer_headers = _login(client, "rev1", "ReviewerPass1!")
@@ -63,6 +66,7 @@ def test_review_round_end_to_end(client, db_session: Session) -> None:
         "/api/v1/reviews/forms",
         json={
             "name": "Default Form",
+            "organization_id": org_id,
             "criteria": [
                 {"name": "Quality", "weight": 0.5, "min": 0, "max": 5},
                 {"name": "Completeness", "weight": 0.5, "min": 0, "max": 5},
@@ -188,15 +192,17 @@ def test_recheck_and_auto_assignment_and_rbac(client, db_session: Session) -> No
     instructor = _create_user(db_session, "inst2", UserRole.instructor, "InstructorPass1!")
     reviewer = _create_user(db_session, "rev3", UserRole.reviewer, "ReviewerPass1!")
     student = _create_user(db_session, "student2", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
 
     instructor_headers = _login(client, "inst2", "InstructorPass1!")
     student_headers = _login(client, "student2", "StudentPass1!")
 
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Form2", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Form2", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=instructor_headers,
     )
     round_response = client.post(
@@ -235,7 +241,7 @@ def test_recheck_and_auto_assignment_and_rbac(client, db_session: Session) -> No
 
     rbac_denied = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Denied", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Denied", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=student_headers,
     )
     assert rbac_denied.status_code == 403
@@ -243,12 +249,12 @@ def test_recheck_and_auto_assignment_and_rbac(client, db_session: Session) -> No
 
 def test_review_scope_grant_required_for_instructor_round_creation(client, db_session: Session) -> None:
     instructor = _create_user(db_session, "inst_no_scope", UserRole.instructor, "InstructorPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     instructor_headers = _login(client, "inst_no_scope", "InstructorPass1!")
 
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Scoped Form", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Scoped Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=instructor_headers,
     )
     assert form.status_code == 200
@@ -272,15 +278,17 @@ def test_recheck_creation_denies_cross_user_requests(client, db_session: Session
     reviewer = _create_user(db_session, "rev_cross", UserRole.reviewer, "ReviewerPass1!")
     student_owner = _create_user(db_session, "student_owner", UserRole.student, "StudentPass1!")
     student_other = _create_user(db_session, "student_other", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
+    _enroll_user_in_section(db_session, student_owner.id, section_id)
 
     instructor_headers = _login(client, "inst_cross", "InstructorPass1!")
     student_owner_headers = _login(client, "student_owner", "StudentPass1!")
 
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Cross User Form", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Cross User Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=instructor_headers,
     )
     round_response = client.post(
@@ -307,7 +315,7 @@ def test_same_section_coi_blocks_manual_and_auto_assignment(client, db_session: 
     instructor = _create_user(db_session, "inst_coi", UserRole.instructor, "InstructorPass1!")
     reviewer = _create_user(db_session, "rev_coi", UserRole.reviewer, "ReviewerPass1!")
     student = _create_user(db_session, "student_coi", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
     _enroll_user_in_section(db_session, reviewer.id, section_id)
     _enroll_user_in_section(db_session, student.id, section_id)
@@ -315,7 +323,7 @@ def test_same_section_coi_blocks_manual_and_auto_assignment(client, db_session: 
     instructor_headers = _login(client, "inst_coi", "InstructorPass1!")
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "COI Form", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "COI Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=instructor_headers,
     )
     round_response = client.post(
@@ -345,15 +353,17 @@ def test_recheck_creation_denies_instructor_without_scope(client, db_session: Se
     unscoped_instructor = _create_user(db_session, "inst_scope_no", UserRole.instructor, "InstructorPass1!")
     reviewer = _create_user(db_session, "rev_scope", UserRole.reviewer, "ReviewerPass1!")
     student = _create_user(db_session, "student_scope", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, scoped_instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
 
     scoped_headers = _login(client, "inst_scope_yes", "InstructorPass1!")
     unscoped_headers = _login(client, "inst_scope_no", "InstructorPass1!")
 
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Scope Form", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Scope Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=scoped_headers,
     )
     round_response = client.post(
@@ -380,15 +390,17 @@ def test_semiblind_reviewer_visibility_uses_stable_pseudonym(client, db_session:
     instructor = _create_user(db_session, "inst_semiblind", UserRole.instructor, "InstructorPass1!")
     reviewer = _create_user(db_session, "rev_semiblind", UserRole.reviewer, "ReviewerPass1!")
     student = _create_user(db_session, "student_semiblind", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
 
     instructor_headers = _login(client, "inst_semiblind", "InstructorPass1!")
     reviewer_headers = _login(client, "rev_semiblind", "ReviewerPass1!")
 
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Semi Blind Form", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Semi Blind Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=instructor_headers,
     )
     assert form.status_code == 200
@@ -438,7 +450,7 @@ def test_review_form_rejected_by_data_quality(client, db_session: Session) -> No
 
     response = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "", "criteria": []},
+        json={"name": "", "organization_id": 1, "criteria": []},
         headers=headers,
     )
     assert response.status_code == 422
@@ -449,3 +461,148 @@ def test_review_form_rejected_by_data_quality(client, db_session: Session) -> No
     row = db_session.query(QuarantineEntry).filter(QuarantineEntry.id == quarantine_id).first()
     assert row is not None
     assert row.entity_type == "ReviewFormWrite"
+
+
+def test_manual_assignment_rejects_invalid_reviewer_role(client, db_session: Session) -> None:
+    instructor = _create_user(db_session, "inst_invalid_reviewer", UserRole.instructor, "InstructorPass1!")
+    invalid_reviewer = _create_user(db_session, "student_as_reviewer", UserRole.student, "StudentPass1!")
+    student = _create_user(db_session, "review_valid_student", UserRole.student, "StudentPass1!")
+    org_id, term_id, section_id = _seed_round_context(db_session)
+    _grant_section_scope(db_session, instructor.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
+    _grant_section_scope(db_session, valid_reviewer.id, section_id)
+
+    instructor_headers = _login(client, "inst_invalid_reviewer", "InstructorPass1!")
+    form = client.post(
+        "/api/v1/reviews/forms",
+        json={"name": "Assignment Validation Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        headers=instructor_headers,
+    )
+    round_response = client.post(
+        "/api/v1/reviews/rounds",
+        json={"name": "Assignment Validation Round", "term_id": term_id, "section_id": section_id, "scoring_form_id": form.json()["id"], "identity_mode": "OPEN"},
+        headers=instructor_headers,
+    )
+
+    response = client.post(
+        f"/api/v1/reviews/rounds/{round_response.json()['id']}/assignments/manual",
+        json={"reviewer_id": invalid_reviewer.id, "student_id": student.id},
+        headers=instructor_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_manual_assignment_rejects_non_enrolled_student(client, db_session: Session) -> None:
+    instructor = _create_user(db_session, "inst_non_enrolled", UserRole.instructor, "InstructorPass1!")
+    reviewer = _create_user(db_session, "valid_reviewer", UserRole.reviewer, "ReviewerPass1!")
+    student = _create_user(db_session, "not_enrolled_student", UserRole.student, "StudentPass1!")
+    org_id, term_id, section_id = _seed_round_context(db_session)
+    _grant_section_scope(db_session, instructor.id, section_id)
+
+    instructor_headers = _login(client, "inst_non_enrolled", "InstructorPass1!")
+    form = client.post(
+        "/api/v1/reviews/forms",
+        json={"name": "Enrollment Validation Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        headers=instructor_headers,
+    )
+    round_response = client.post(
+        "/api/v1/reviews/rounds",
+        json={"name": "Enrollment Validation Round", "term_id": term_id, "section_id": section_id, "scoring_form_id": form.json()["id"], "identity_mode": "OPEN"},
+        headers=instructor_headers,
+    )
+
+    response = client.post(
+        f"/api/v1/reviews/rounds/{round_response.json()['id']}/assignments/manual",
+        json={"reviewer_id": reviewer.id, "student_id": student.id},
+        headers=instructor_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_auto_assignment_rejects_cross_org_reviewer_pool(client, db_session: Session) -> None:
+    instructor = _create_user(db_session, "inst_auto_scope", UserRole.instructor, "InstructorPass1!")
+    reviewer = _create_user(db_session, "rev_cross_org", UserRole.reviewer, "ReviewerPass1!", org_id=999)
+    student = _create_user(db_session, "student_auto_scope", UserRole.student, "StudentPass1!")
+    org_id, term_id, section_id = _seed_round_context(db_session)
+    _grant_section_scope(db_session, instructor.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
+
+    instructor_headers = _login(client, "inst_auto_scope", "InstructorPass1!")
+    form = client.post(
+        "/api/v1/reviews/forms",
+        json={"name": "Scoped Auto Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        headers=instructor_headers,
+    )
+    round_response = client.post(
+        "/api/v1/reviews/rounds",
+        json={"name": "Scoped Auto Round", "term_id": term_id, "section_id": section_id, "scoring_form_id": form.json()["id"], "identity_mode": "OPEN"},
+        headers=instructor_headers,
+    )
+
+    response = client.post(
+        f"/api/v1/reviews/rounds/{round_response.json()['id']}/assignments/auto",
+        json={"student_ids": [student.id], "reviewers_per_student": 1},
+        headers=instructor_headers,
+    )
+    assert response.status_code == 403
+
+
+def test_cross_tenant_review_form_usage_is_forbidden(client, db_session: Session) -> None:
+    instructor = _create_user(db_session, "inst_cross_form", UserRole.instructor, "InstructorPass1!")
+    other_org = Organization(name="Other Review Org", code="OTHER_R", is_active=True)
+    db_session.add(other_org)
+    db_session.commit()
+    org_id, term_id, section_id = _seed_round_context(db_session)
+    _grant_section_scope(db_session, instructor.id, section_id)
+
+    admin = _create_user(db_session, "admin_cross_form", UserRole.admin, "AdminPass1!")
+    admin_headers = _login(client, "admin_cross_form", "AdminPass1!")
+    instructor_headers = _login(client, "inst_cross_form", "InstructorPass1!")
+
+    form = client.post(
+        "/api/v1/reviews/forms",
+        json={"name": "Cross Tenant Form", "organization_id": other_org.id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        headers=admin_headers,
+    )
+    assert form.status_code == 200
+
+    round_response = client.post(
+        "/api/v1/reviews/rounds",
+        json={"name": "Cross Tenant Round", "term_id": term_id, "section_id": section_id, "scoring_form_id": form.json()["id"], "identity_mode": "OPEN"},
+        headers=instructor_headers,
+    )
+    assert round_response.status_code == 403
+
+
+def test_multilevel_reporting_conflict_blocks_assignment(client, db_session: Session) -> None:
+    instructor = _create_user(db_session, "inst_multilevel", UserRole.instructor, "InstructorPass1!")
+    manager = _create_user(db_session, "mgr_multilevel", UserRole.reviewer, "ReviewerPass1!")
+    reviewer = _create_user(db_session, "rev_multilevel", UserRole.reviewer, "ReviewerPass1!")
+    student = _create_user(db_session, "student_multilevel", UserRole.student, "StudentPass1!")
+    reviewer.reports_to = manager.id
+    student.reports_to = reviewer.id
+    db_session.commit()
+
+    org_id, term_id, section_id = _seed_round_context(db_session)
+    _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
+    _enroll_user_in_section(db_session, student.id, section_id)
+
+    instructor_headers = _login(client, "inst_multilevel", "InstructorPass1!")
+    form = client.post(
+        "/api/v1/reviews/forms",
+        json={"name": "Hierarchy Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        headers=instructor_headers,
+    )
+    round_response = client.post(
+        "/api/v1/reviews/rounds",
+        json={"name": "Hierarchy Round", "term_id": term_id, "section_id": section_id, "scoring_form_id": form.json()["id"], "identity_mode": "OPEN"},
+        headers=instructor_headers,
+    )
+
+    response = client.post(
+        f"/api/v1/reviews/rounds/{round_response.json()['id']}/assignments/manual",
+        json={"reviewer_id": reviewer.id, "student_id": student.id},
+        headers=instructor_headers,
+    )
+    assert response.status_code == 409

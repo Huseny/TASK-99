@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.core.security import hash_password
 from app.models.admin import AuditLog, AuditLogArchive
 from app.models.data_quality import QuarantineEntry
-from app.models.user import User, UserRole
+from app.models.user import SessionToken, User, UserRole
 
 
 def _create_user(db: Session, username: str, role: UserRole, password: str = "AdminPassword1!") -> User:
@@ -169,6 +169,11 @@ def test_user_deactivation_revokes_sessions(client, db_session: Session) -> None
 
     deactivate = client.put(f"/api/v1/admin/users/{reviewer_id}", json={"is_active": False}, headers=admin_headers)
     assert deactivate.status_code == 200
+    db_session.expire_all()
+    revoked_session = db_session.query(SessionToken).filter(SessionToken.user_id == reviewer_id).first()
+    assert revoked_session is not None
+    assert revoked_session.revoked is True
+    assert revoked_session.revoked_at is not None
 
     me = client.get("/api/v1/auth/me", headers=reviewer_headers)
     assert me.status_code == 401
@@ -244,3 +249,40 @@ def test_admin_course_write_rejected_by_data_quality(client, db_session: Session
     row = db_session.query(QuarantineEntry).filter(QuarantineEntry.id == quarantine_id).first()
     assert row is not None
     assert row.entity_type == "AdminCourseWrite"
+
+
+def test_admin_course_dedup_checks_authoritative_table(client, db_session: Session) -> None:
+    _create_user(db_session, "admin_dup", UserRole.admin)
+    headers = _auth_headers(client, "admin_dup", "AdminPassword1!")
+
+    org = client.post("/api/v1/admin/organizations", json={"name": "Dup Campus", "code": "DUP", "is_active": True}, headers=headers)
+    org_id = org.json()["id"]
+
+    first = client.post(
+        "/api/v1/admin/courses",
+        json={"organization_id": org_id, "code": "CS500", "title": "Distributed Systems", "credits": 3, "prerequisites": []},
+        headers=headers,
+    )
+    assert first.status_code == 200
+
+    duplicate = client.post(
+        "/api/v1/admin/courses",
+        json={"organization_id": org_id, "code": "CS500", "title": "Distributed Systems", "credits": 3, "prerequisites": []},
+        headers=headers,
+    )
+    assert duplicate.status_code == 422
+
+    near_duplicate = client.post(
+        "/api/v1/admin/courses",
+        json={"organization_id": org_id, "code": "CS501", "title": "Distributed System", "credits": 3, "prerequisites": []},
+        headers=headers,
+    )
+    assert near_duplicate.status_code == 422
+    assert near_duplicate.json()["detail"]["quarantine_id"] is not None
+
+    unique = client.post(
+        "/api/v1/admin/courses",
+        json={"organization_id": org_id, "code": "CS502", "title": "Operating Systems", "credits": 3, "prerequisites": []},
+        headers=headers,
+    )
+    assert unique.status_code == 200

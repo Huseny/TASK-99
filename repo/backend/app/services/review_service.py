@@ -7,8 +7,9 @@ from statistics import median
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.authz import can_access_section
 from app.core.config import settings
-from app.models.admin import Section
+from app.models.admin import Course, Section
 from app.models.registration import Enrollment, EnrollmentStatus
 from app.models.review import (
     IdentityMode,
@@ -22,6 +23,7 @@ from app.models.review import (
     ScoringForm,
 )
 from app.models.user import User, UserRole
+from app.services import registration_service
 
 
 def _get_round(db: Session, round_id: int) -> ReviewRound:
@@ -29,6 +31,37 @@ def _get_round(db: Session, round_id: int) -> ReviewRound:
     if round_obj is None:
         raise HTTPException(status_code=404, detail="Review round not found.")
     return round_obj
+
+
+def _section_organization_id(db: Session, section_id: int) -> int | None:
+    row = (
+        db.query(Course.organization_id)
+        .join(Section, Section.course_id == Course.id)
+        .filter(Section.id == section_id)
+        .first()
+    )
+    return int(row[0]) if row is not None else None
+
+
+def get_scoring_form(db: Session, form_id: int) -> ScoringForm:
+    form = db.query(ScoringForm).filter(ScoringForm.id == form_id).first()
+    if form is None:
+        raise HTTPException(status_code=404, detail="Scoring form not found.")
+    return form
+
+
+def ensure_form_matches_section_org(db: Session, form: ScoringForm, section_id: int) -> None:
+    section_org_id = _section_organization_id(db, section_id)
+    if section_org_id is None:
+        raise HTTPException(status_code=404, detail="Section not found.")
+    if form.organization_id is None or int(form.organization_id) != section_org_id:
+        raise HTTPException(status_code=403, detail="Scoring form is outside the section organization scope.")
+
+
+def ensure_round_form_scope(db: Session, round_obj: ReviewRound) -> ScoringForm:
+    form = get_scoring_form(db, round_obj.scoring_form_id)
+    ensure_form_matches_section_org(db, form, round_obj.section_id)
+    return form
 
 
 def _is_reporting_line_conflict(reviewer: User, student: User) -> bool:
@@ -43,7 +76,7 @@ def _check_coi(db: Session, round_obj: ReviewRound, reviewer_id: int, student_id
     section = db.query(Section).filter(Section.id == round_obj.section_id).first()
     if section and section.instructor_id == reviewer_id:
         raise HTTPException(status_code=409, detail="Conflict of interest: same section instructor.")
-    if _is_reporting_line_conflict(reviewer, student):
+    if _is_reporting_line_conflict(reviewer, student) or registration_service._has_management_conflict(db, reviewer_id, student_id):
         raise HTTPException(status_code=409, detail="Conflict of interest: reporting line conflict.")
     if reviewer_id == student_id:
         raise HTTPException(status_code=409, detail="Conflict of interest: self review is not allowed.")
@@ -58,6 +91,127 @@ def _check_coi(db: Session, round_obj: ReviewRound, reviewer_id: int, student_id
     )
     if same_section_enrollment >= 2:
         raise HTTPException(status_code=409, detail="Conflict of interest: reviewer and student are in the same section.")
+
+
+def _get_assignment_reviewer(db: Session, reviewer_id: int) -> User:
+    reviewer = db.query(User).filter(User.id == reviewer_id).first()
+    if reviewer is None:
+        raise HTTPException(status_code=404, detail="Reviewer not found.")
+    if reviewer.role != UserRole.reviewer:
+        raise HTTPException(status_code=422, detail="Assigned reviewer must have REVIEWER role.")
+    if not reviewer.is_active:
+        raise HTTPException(status_code=422, detail="Assigned reviewer must be active.")
+    return reviewer
+
+
+def _get_assignment_student(db: Session, round_obj: ReviewRound, student_id: int) -> User:
+    student = db.query(User).filter(User.id == student_id).first()
+    if student is None:
+        raise HTTPException(status_code=404, detail="Student not found.")
+    if student.role != UserRole.student:
+        raise HTTPException(status_code=422, detail="Assigned student must have STUDENT role.")
+    enrollment = (
+        db.query(Enrollment.id)
+        .filter(
+            Enrollment.student_id == student_id,
+            Enrollment.section_id == round_obj.section_id,
+            Enrollment.status.in_([EnrollmentStatus.enrolled, EnrollmentStatus.completed]),
+        )
+        .first()
+    )
+    if enrollment is None:
+        raise HTTPException(status_code=422, detail="Assigned student is not enrolled in the review round section.")
+    return student
+
+
+def validate_assignment_participants(db: Session, round_obj: ReviewRound, reviewer_id: int, student_id: int) -> tuple[User, User]:
+    reviewer = _get_assignment_reviewer(db, reviewer_id)
+    if not can_access_section(db, reviewer, round_obj.section_id):
+        raise HTTPException(status_code=403, detail="Assigned reviewer is outside the review round scope.")
+    student = _get_assignment_student(db, round_obj, student_id)
+    return reviewer, student
+
+
+def create_manual_assignment(db: Session, round_obj: ReviewRound, reviewer_id: int, student_id: int) -> ReviewerAssignment:
+    ensure_round_form_scope(db, round_obj)
+    validate_assignment_participants(db, round_obj, reviewer_id, student_id)
+    _check_coi(db, round_obj, reviewer_id, student_id)
+    existing = (
+        db.query(ReviewerAssignment)
+        .filter(
+            ReviewerAssignment.round_id == round_obj.id,
+            ReviewerAssignment.reviewer_id == reviewer_id,
+            ReviewerAssignment.student_id == student_id,
+        )
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Assignment already exists.")
+    assignment = ReviewerAssignment(
+        round_id=round_obj.id,
+        reviewer_id=reviewer_id,
+        student_id=student_id,
+        section_id=round_obj.section_id,
+        assigned_manually=True,
+    )
+    db.add(assignment)
+    db.flush()
+    return assignment
+
+
+def auto_assign_reviewers(db: Session, round_obj: ReviewRound, student_ids: list[int], reviewers_per_student: int) -> list[ReviewerAssignment]:
+    ensure_round_form_scope(db, round_obj)
+    all_reviewers = db.query(User).filter(User.role == UserRole.reviewer, User.is_active.is_(True)).all()
+    if not all_reviewers:
+        raise HTTPException(status_code=422, detail="No active reviewers available.")
+    reviewers = [row for row in all_reviewers if can_access_section(db, row, round_obj.section_id)]
+    if not reviewers:
+        raise HTTPException(status_code=403, detail="No reviewers are authorized for the review round scope.")
+
+    validated_students = []
+    for student_id in student_ids:
+        _get_assignment_student(db, round_obj, student_id)
+        validated_students.append(student_id)
+
+    created_assignments: list[ReviewerAssignment] = []
+    pointer = 0
+    for student_id in validated_students:
+        assigned_for_student = 0
+        tried = 0
+        while assigned_for_student < reviewers_per_student and tried < len(reviewers) * 3:
+            reviewer = reviewers[pointer % len(reviewers)]
+            pointer += 1
+            tried += 1
+            try:
+                validate_assignment_participants(db, round_obj, reviewer.id, student_id)
+                _check_coi(db, round_obj, reviewer.id, student_id)
+            except HTTPException:
+                continue
+            exists = (
+                db.query(ReviewerAssignment)
+                .filter(
+                    ReviewerAssignment.round_id == round_obj.id,
+                    ReviewerAssignment.reviewer_id == reviewer.id,
+                    ReviewerAssignment.student_id == student_id,
+                )
+                .first()
+            )
+            if exists:
+                continue
+            assignment = ReviewerAssignment(
+                round_id=round_obj.id,
+                reviewer_id=reviewer.id,
+                student_id=student_id,
+                section_id=round_obj.section_id,
+                assigned_manually=False,
+            )
+            db.add(assignment)
+            db.flush()
+            created_assignments.append(assignment)
+            assigned_for_student += 1
+        if assigned_for_student < reviewers_per_student:
+            raise HTTPException(status_code=409, detail=f"Insufficient eligible reviewers for student {student_id} due to conflicts.")
+    return created_assignments
 
 
 def _calculate_total_score(form: ScoringForm, criterion_scores: dict[str, float]) -> float:

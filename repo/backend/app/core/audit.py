@@ -16,14 +16,17 @@ def _hash_payload(payload: dict | None) -> str | None:
 def write_audit_log(
     db: Session,
     *,
-    actor_id: int,
+    actor_id: int | None,
     action: str,
     entity_name: str,
     entity_id: int | None,
     before: dict | None,
     after: dict | None,
     metadata: dict | None = None,
+    allow_actorless: bool = False,
 ) -> None:
+    if actor_id is None and not allow_actorless:
+        raise ValueError(f"Audit actor_id is required for action '{action}'.")
     entry = AuditLog(
         actor_id=actor_id,
         action=action,

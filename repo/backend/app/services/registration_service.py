@@ -6,7 +6,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.authz import require_section_access
+from app.core.audit import write_audit_log
+from app.core.authz import require_section_access, require_student_access
 from app.models.admin import Course, RegistrationRound, Section, Term
 from app.models.registration import AddDropRequest, Enrollment, EnrollmentStatus, RegistrationHistory, WaitlistEntry
 from app.models.user import User, UserRole
@@ -23,6 +24,11 @@ def _require_student_role(student: User) -> None:
         raise HTTPException(status_code=403, detail="Student access required.")
 
 
+def _require_roster_manager(user: User) -> None:
+    if user.role not in {UserRole.instructor, UserRole.admin}:
+        raise HTTPException(status_code=403, detail="Instructor or admin access required.")
+
+
 def _request_hash(payload: dict) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -32,10 +38,49 @@ def _record_history(db: Session, student_id: int, section_id: int, event_type: s
     db.add(RegistrationHistory(student_id=student_id, section_id=section_id, event_type=event_type, details=details))
 
 
+def _roster_audit_state(*, section_id: int, student_id: int, status_value: str | None) -> dict:
+    return {
+        "section_id": section_id,
+        "student_id": student_id,
+        "status": status_value,
+    }
+
+
 def _to_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _has_management_conflict(db: Session, reviewer_id: int, student_id: int) -> bool:
+    def _ancestors(user_id: int) -> set[int]:
+        result: set[int] = set()
+        current_id = user_id
+        while True:
+            row = db.query(User.reports_to).filter(User.id == current_id).first()
+            if row is None or row[0] is None or row[0] in result:
+                break
+            parent_id = int(row[0])
+            result.add(parent_id)
+            current_id = parent_id
+        return result
+
+    def _descendants(user_id: int) -> set[int]:
+        seen: set[int] = set()
+        frontier = [user_id]
+        while frontier:
+            current = frontier.pop()
+            children = [int(row[0]) for row in db.query(User.id).filter(User.reports_to == current).all()]
+            for child_id in children:
+                if child_id in seen:
+                    continue
+                seen.add(child_id)
+                frontier.append(child_id)
+        return seen
+
+    reviewer_graph = {reviewer_id, *_ancestors(reviewer_id), *_descendants(reviewer_id)}
+    student_graph = {student_id, *_ancestors(student_id), *_descendants(student_id)}
+    return len(reviewer_graph & student_graph) > 0
 
 
 def _purge_expired_idempotency_key(db: Session, actor_id: int, operation: str, idempotency_key: str) -> None:
@@ -128,6 +173,13 @@ def _consume_waitlist_if_seat_available(db: Session, section_id: int) -> None:
         db.delete(next_wait)
 
 
+def _get_locked_section(db: Session, section_id: int) -> Section:
+    section = db.query(Section).filter(Section.id == section_id).with_for_update().first()
+    if section is None:
+        raise HTTPException(status_code=404, detail="Section not found.")
+    return section
+
+
 def enroll(db: Session, student: User, section_id: int, idempotency_key: str) -> tuple[int, dict]:
     _require_student_role(student)
     require_section_access(db, student, section_id)
@@ -144,9 +196,7 @@ def enroll(db: Session, student: User, section_id: int, idempotency_key: str) ->
             raise HTTPException(status_code=409, detail="Idempotency key conflict for different request payload.")
         return existing_request.response_code, json.loads(existing_request.response_body)
 
-    section = db.query(Section).filter(Section.id == section_id).with_for_update().first()
-    if section is None:
-        raise HTTPException(status_code=404, detail="Section not found.")
+    section = _get_locked_section(db, section_id)
     reasons = check_eligibility(db, student, section.course_id, section_id)
     if reasons:
         raise HTTPException(status_code=422, detail={"eligible": False, "reasons": reasons})
@@ -242,3 +292,83 @@ def drop(db: Session, student: User, section_id: int, idempotency_key: str) -> t
     )
     db.commit()
     return code, response
+
+
+def list_roster(db: Session, actor: User, section_id: int) -> list[dict]:
+    _require_roster_manager(actor)
+    require_section_access(db, actor, section_id)
+    rows = (
+        db.query(Enrollment, User)
+        .join(User, User.id == Enrollment.student_id)
+        .filter(Enrollment.section_id == section_id)
+        .order_by(User.username.asc())
+        .all()
+    )
+    return [{"student_id": user.id, "username": user.username, "status": enrollment.status.value} for enrollment, user in rows]
+
+
+def add_student_to_roster(db: Session, actor: User, section_id: int, student_id: int) -> dict:
+    _require_roster_manager(actor)
+    require_section_access(db, actor, section_id)
+    require_student_access(db, actor, student_id)
+    student = db.query(User).filter(User.id == student_id).first()
+    if student is None or student.role != UserRole.student:
+        raise HTTPException(status_code=422, detail="Roster entries must be student users.")
+    section = _get_locked_section(db, section_id)
+    existing = db.query(Enrollment).filter(Enrollment.student_id == student_id, Enrollment.section_id == section_id).first()
+    if existing is not None and existing.status == EnrollmentStatus.enrolled:
+        return {"status": "already_enrolled", "section_id": section_id, "student_id": student_id}
+    before_state = _roster_audit_state(
+        section_id=section_id,
+        student_id=student_id,
+        status_value=existing.status.value if existing is not None else None,
+    )
+    if _current_enrolled_count(db, section_id) >= section.capacity:
+        raise HTTPException(status_code=409, detail="Section is full.")
+    if existing is None:
+        db.add(Enrollment(student_id=student_id, section_id=section_id, status=EnrollmentStatus.enrolled))
+    else:
+        existing.status = EnrollmentStatus.enrolled
+    _record_history(db, student_id, section_id, "ROSTER_ADDED", f"added_by={actor.id}")
+    write_audit_log(
+        db,
+        actor_id=actor.id,
+        action="registration.roster.add",
+        entity_name="section_roster",
+        entity_id=section_id,
+        before=before_state,
+        after=_roster_audit_state(section_id=section_id, student_id=student_id, status_value=EnrollmentStatus.enrolled.value),
+        metadata={"student_id": student_id},
+    )
+    db.commit()
+    return {"status": "enrolled", "section_id": section_id, "student_id": student_id}
+
+
+def remove_student_from_roster(db: Session, actor: User, section_id: int, student_id: int) -> dict:
+    _require_roster_manager(actor)
+    require_section_access(db, actor, section_id)
+    require_student_access(db, actor, student_id)
+    enrollment = (
+        db.query(Enrollment)
+        .filter(Enrollment.student_id == student_id, Enrollment.section_id == section_id, Enrollment.status == EnrollmentStatus.enrolled)
+        .first()
+    )
+    if enrollment is None:
+        raise HTTPException(status_code=404, detail="Student is not actively enrolled in this section.")
+    before_state = _roster_audit_state(section_id=section_id, student_id=student_id, status_value=enrollment.status.value)
+    enrollment.status = EnrollmentStatus.dropped
+    _record_history(db, student_id, section_id, "ROSTER_REMOVED", f"removed_by={actor.id}")
+    write_audit_log(
+        db,
+        actor_id=actor.id,
+        action="registration.roster.remove",
+        entity_name="section_roster",
+        entity_id=section_id,
+        before=before_state,
+        after=_roster_audit_state(section_id=section_id, student_id=student_id, status_value=EnrollmentStatus.dropped.value),
+        metadata={"student_id": student_id},
+    )
+    db.flush()
+    _consume_waitlist_if_seat_available(db, section_id)
+    db.commit()
+    return {"status": "dropped", "section_id": section_id, "student_id": student_id}

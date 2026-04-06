@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 class ScoringFormCreate(BaseModel):
     name: str
+    organization_id: int
     criteria: list[dict]
 
 

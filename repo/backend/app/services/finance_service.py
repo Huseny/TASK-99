@@ -7,8 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core.authz import require_scope_access
 from app.core.config import settings
 from app.models.finance import BankStatementLine, EntryType, LedgerAccount, LedgerEntry, PaymentInstrument, ReconciliationReport
+from app.models.user import User, UserRole
 
 
 def _utcnow() -> datetime:
@@ -41,6 +43,7 @@ def _record_credit_entry(
     student_id: int,
     amount: float,
     instrument: PaymentInstrument,
+    reference_id: str | None,
     description: str | None,
     entry_date: date,
 ) -> LedgerEntry:
@@ -51,6 +54,7 @@ def _record_credit_entry(
         entry_type=EntryType.payment,
         amount=-abs(amount),
         instrument=instrument,
+        external_reference_id=reference_id,
         description=description,
         entry_date=entry_date,
     )
@@ -65,11 +69,12 @@ def record_payment(
     student_id: int,
     amount: float,
     instrument: str,
+    reference_id: str | None,
     description: str | None,
     entry_date: date,
 ) -> LedgerEntry:
     payment_instrument = _parse_instrument(instrument)
-    return _record_credit_entry(db, student_id, amount, payment_instrument, description, entry_date)
+    return _record_credit_entry(db, student_id, amount, payment_instrument, reference_id, description, entry_date)
 
 
 def record_prepayment(
@@ -77,12 +82,13 @@ def record_prepayment(
     student_id: int,
     amount: float,
     instrument: str,
+    reference_id: str | None,
     description: str | None,
     entry_date: date,
 ) -> LedgerEntry:
     payment_instrument = _parse_instrument(instrument)
     note = description or "Prepayment"
-    return _record_credit_entry(db, student_id, amount, payment_instrument, note, entry_date)
+    return _record_credit_entry(db, student_id, amount, payment_instrument, reference_id, note, entry_date)
 
 
 def record_deposit(
@@ -90,12 +96,13 @@ def record_deposit(
     student_id: int,
     amount: float,
     instrument: str,
+    reference_id: str | None,
     description: str | None,
     entry_date: date,
 ) -> LedgerEntry:
     payment_instrument = _parse_instrument(instrument)
     note = description or "Deposit"
-    return _record_credit_entry(db, student_id, amount, payment_instrument, note, entry_date)
+    return _record_credit_entry(db, student_id, amount, payment_instrument, reference_id, note, entry_date)
 
 
 def record_refund(
@@ -222,29 +229,58 @@ def arrears_with_late_fee(db: Session) -> tuple[list[dict], int]:
     return result, generated_late_fees
 
 
-def import_reconciliation_csv(db: Session, csv_text: str) -> ReconciliationReport:
+def import_reconciliation_csv(db: Session, csv_text: str, *, actor: User) -> ReconciliationReport:
     import_id = uuid.uuid4().hex
     reader = csv.DictReader(io.StringIO(csv_text))
-    if not reader.fieldnames or not {"student_id", "amount", "statement_date"}.issubset(set(reader.fieldnames)):
-        raise HTTPException(status_code=422, detail="CSV must contain student_id, amount, statement_date columns.")
+    required_columns = {"student_id", "amount", "statement_date", "reference_id", "payment_method"}
+    if not reader.fieldnames or not required_columns.issubset(set(reader.fieldnames)):
+        raise HTTPException(status_code=422, detail="CSV must contain student_id, amount, statement_date, reference_id, payment_method columns.")
 
     matched_total = 0.0
     unmatched_total = 0.0
+    statement_total = 0.0
+    ledger_total = 0.0
 
     for idx, row in enumerate(reader, start=1):
         student_id = int(row["student_id"]) if row.get("student_id") else None
-        amount = float(row["amount"])
-        statement_date = datetime.strptime(row["statement_date"], "%Y-%m-%d").date()
+        if student_id is None and actor.role != UserRole.admin:
+            raise HTTPException(status_code=403, detail="Non-admin reconciliation imports require student_id on every row.")
         if student_id is not None:
-            match = (
+            require_scope_access(
+                db,
+                actor,
+                type("StudentResource", (), {"student_id": student_id})(),
+                detail="Access denied for one or more reconciliation rows.",
+            )
+        amount = float(row["amount"])
+        statement_total += abs(amount)
+        statement_date = datetime.strptime(row["statement_date"], "%Y-%m-%d").date()
+        reference_id = row.get("reference_id") or None
+        payment_method = row.get("payment_method") or None
+        matched_entry = None
+        explanation = "No matching ledger entry found."
+        if student_id is not None:
+            if payment_method is None or reference_id is None:
+                raise HTTPException(status_code=422, detail="Every reconciliation row must include reference_id and payment_method.")
+            instrument = _parse_instrument(payment_method)
+            matched_entry = (
                 db.query(LedgerEntry)
-                .filter(LedgerEntry.student_id == student_id, func.abs(LedgerEntry.amount) == abs(amount))
+                .filter(
+                    LedgerEntry.student_id == student_id,
+                    func.abs(LedgerEntry.amount) == abs(amount),
+                    LedgerEntry.external_reference_id == reference_id,
+                    LedgerEntry.entry_date == statement_date,
+                    LedgerEntry.instrument == instrument,
+                )
                 .first()
             )
-        else:
-            match = None
+            if matched_entry is not None:
+                explanation = "Matched on student_id, reference_id, transaction_date, payment_method, and amount."
+                ledger_total += abs(matched_entry.amount)
+            else:
+                explanation = "No ledger entry matched the full reconciliation key."
 
-        matched = match is not None
+        matched = matched_entry is not None
         if matched:
             matched_total += abs(amount)
         else:
@@ -256,21 +292,50 @@ def import_reconciliation_csv(db: Session, csv_text: str) -> ReconciliationRepor
                 line_number=idx,
                 student_id=student_id,
                 amount=amount,
+                reference_id=reference_id,
+                payment_method=payment_method,
                 statement_date=statement_date,
                 raw_line=str(row),
                 matched=matched,
+                matched_entry_id=matched_entry.id if matched_entry is not None else None,
+                explanation=explanation,
             )
         )
 
-    report = ReconciliationReport(import_id=import_id, matched_total=round(matched_total, 2), unmatched_total=round(unmatched_total, 2))
+    report = ReconciliationReport(
+        import_id=import_id,
+        matched_total=round(matched_total, 2),
+        unmatched_total=round(unmatched_total, 2),
+        statement_total=round(statement_total, 2),
+        ledger_total=round(ledger_total, 2),
+        variance_total=round(statement_total - ledger_total, 2),
+    )
     db.add(report)
     db.flush()
     db.refresh(report)
     return report
 
 
-def get_reconciliation_report(db: Session, import_id: str) -> ReconciliationReport:
+def get_reconciliation_report(db: Session, import_id: str, *, actor: User) -> ReconciliationReport:
     report = db.query(ReconciliationReport).filter(ReconciliationReport.import_id == import_id).first()
     if report is None:
         raise HTTPException(status_code=404, detail="Reconciliation report not found.")
+    if actor.role != UserRole.admin:
+        unresolved_rows = (
+            db.query(BankStatementLine.id)
+            .filter(BankStatementLine.import_id == import_id, BankStatementLine.student_id.is_(None))
+            .first()
+        )
+        if unresolved_rows is not None:
+            raise HTTPException(status_code=403, detail="Access denied for requested reconciliation report.")
+        require_scope_access(
+            db,
+            actor,
+            report,
+            detail="Access denied for requested reconciliation report.",
+        )
     return report
+
+
+def get_reconciliation_lines(db: Session, import_id: str) -> list[BankStatementLine]:
+    return db.query(BankStatementLine).filter(BankStatementLine.import_id == import_id).order_by(BankStatementLine.line_number.asc()).all()

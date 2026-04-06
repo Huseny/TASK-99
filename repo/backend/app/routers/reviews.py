@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.audit import write_audit_log
 from app.core.auth import get_current_user
-from app.core.authz import require_section_access
+from app.core.authz import require_form_access, require_organization_access, require_section_access
 from app.core.database import get_db
 from app.core.logging import get_logger
 from app.models.review import (
@@ -76,12 +76,14 @@ def _enforce_review_write_quality(entity_type: str, payload: dict, db: Session) 
 @router.post("/forms")
 def create_scoring_form(payload: ScoringFormCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_instructor_or_admin(user)
+    if user.role != UserRole.admin:
+        require_organization_access(db, user, payload.organization_id)
     _enforce_review_write_quality(
         "ReviewFormWrite",
-        {"name": payload.name, "criteria_count": len(payload.criteria)},
+        {"name": payload.name, "criteria_count": len(payload.criteria), "organization_id": payload.organization_id},
         db,
     )
-    form = ScoringForm(name=payload.name, criteria=payload.criteria)
+    form = ScoringForm(name=payload.name, criteria=payload.criteria, organization_id=payload.organization_id)
     db.add(form)
     db.flush()
     write_audit_log(
@@ -91,17 +93,20 @@ def create_scoring_form(payload: ScoringFormCreate, db: Session = Depends(get_db
         entity_name="ScoringForm",
         entity_id=form.id,
         before=None,
-        after={"id": form.id, "name": form.name},
+        after={"id": form.id, "name": form.name, "organization_id": form.organization_id},
     )
     db.commit()
-    return {"id": form.id, "name": form.name}
+    return {"id": form.id, "name": form.name, "organization_id": form.organization_id}
 
 
 @router.post("/rounds", response_model=ReviewRoundOut)
 def create_round(payload: ReviewRoundCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_instructor_or_admin(user)
     require_section_access(db, user, payload.section_id)
+    require_form_access(db, user, payload.scoring_form_id)
     _enforce_review_write_quality("ReviewRoundWrite", payload.model_dump(), db)
+    form = review_service.get_scoring_form(db, payload.scoring_form_id)
+    review_service.ensure_form_matches_section_org(db, form, payload.section_id)
     mode = IdentityMode(payload.identity_mode)
     round_obj = ReviewRound(
         name=payload.name,
@@ -145,18 +150,11 @@ def manual_assign(
     _ensure_instructor_or_admin(user)
     round_obj = review_service._get_round(db, round_id)
     _ensure_round_scope(db, user, round_obj)
-    review_service._check_coi(db, round_obj, payload.reviewer_id, payload.student_id)
-    assignment = ReviewerAssignment(
-        round_id=round_id,
-        reviewer_id=payload.reviewer_id,
-        student_id=payload.student_id,
-        section_id=round_obj.section_id,
-        assigned_manually=True,
-    )
-    db.add(assignment)
-    db.flush()
+    review_service.ensure_round_form_scope(db, round_obj)
+    assignment = review_service.create_manual_assignment(db, round_obj, payload.reviewer_id, payload.student_id)
     messaging_service.dispatch_notifications(
         db,
+        actor=user,
         trigger_type="ASSIGNMENT_POSTED",
         title=f"Assignment posted: {round_obj.name}",
         message="A new assignment has been posted for your review cycle.",
@@ -200,45 +198,10 @@ def auto_assign(
     _ensure_instructor_or_admin(user)
     round_obj = review_service._get_round(db, round_id)
     _ensure_round_scope(db, user, round_obj)
-    reviewers = db.query(User).filter(User.role == UserRole.reviewer, User.is_active.is_(True)).all()
-    if not reviewers:
-        raise HTTPException(status_code=422, detail="No active reviewers available.")
-
-    created = 0
-    created_ids: list[int] = []
-    pointer = 0
-    for student_id in payload.student_ids:
-        assigned_for_student = 0
-        tried = 0
-        while assigned_for_student < payload.reviewers_per_student and tried < len(reviewers) * 3:
-            reviewer = reviewers[pointer % len(reviewers)]
-            pointer += 1
-            tried += 1
-            try:
-                review_service._check_coi(db, round_obj, reviewer.id, student_id)
-            except HTTPException:
-                continue
-            exists = (
-                db.query(ReviewerAssignment)
-                .filter(ReviewerAssignment.round_id == round_id, ReviewerAssignment.reviewer_id == reviewer.id, ReviewerAssignment.student_id == student_id)
-                .first()
-            )
-            if exists:
-                continue
-            assignment = ReviewerAssignment(
-                round_id=round_id,
-                reviewer_id=reviewer.id,
-                student_id=student_id,
-                section_id=round_obj.section_id,
-                assigned_manually=False,
-            )
-            db.add(assignment)
-            db.flush()
-            created_ids.append(assignment.id)
-            created += 1
-            assigned_for_student += 1
-        if assigned_for_student < payload.reviewers_per_student:
-            raise HTTPException(status_code=409, detail=f"Insufficient eligible reviewers for student {student_id} due to conflicts.")
+    review_service.ensure_round_form_scope(db, round_obj)
+    assignments = review_service.auto_assign_reviewers(db, round_obj, payload.student_ids, payload.reviewers_per_student)
+    created_ids = [assignment.id for assignment in assignments]
+    created = len(created_ids)
     write_audit_log(
         db,
         actor_id=user.id,
@@ -251,6 +214,7 @@ def auto_assign(
     if created_ids:
         messaging_service.dispatch_notifications(
             db,
+            actor=user,
             trigger_type="ASSIGNMENT_POSTED",
             title=f"Assignments posted: {round_obj.name}",
             message="Your assignment queue has been updated.",
@@ -287,11 +251,10 @@ def submit_score(payload: ScoreSubmitIn, db: Session = Depends(get_db), user: Us
         raise HTTPException(status_code=403, detail="Cannot submit score for unassigned work.")
 
     round_obj = review_service._get_round(db, assignment.round_id)
+    review_service.ensure_round_form_scope(db, round_obj)
     if round_obj.status == ReviewRoundStatus.closed:
         raise HTTPException(status_code=409, detail="Round is closed.")
-    form = db.query(ScoringForm).filter(ScoringForm.id == round_obj.scoring_form_id).first()
-    if form is None:
-        raise HTTPException(status_code=404, detail="Scoring form not found.")
+    form = review_service.get_scoring_form(db, round_obj.scoring_form_id)
 
     total = review_service._calculate_total_score(form, payload.criterion_scores)
     existing = db.query(Score).filter(Score.assignment_id == assignment.id).first()
@@ -565,6 +528,7 @@ def close_round(round_id: int, db: Session = Depends(get_db), user: User = Depen
     if recipients:
         messaging_service.dispatch_notifications(
             db,
+            actor=user,
             trigger_type="GRADING_COMPLETED",
             title=f"Grading completed: {round_obj.name}",
             message="Grading has been completed for your review round.",

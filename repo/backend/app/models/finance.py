@@ -37,6 +37,7 @@ class LedgerEntry(Base):
     entry_type: Mapped[EntryType] = mapped_column(Enum(EntryType), nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     instrument: Mapped[PaymentInstrument] = mapped_column(Enum(PaymentInstrument), nullable=True)
+    external_reference_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     reference_entry_id: Mapped[int] = mapped_column(ForeignKey("ledger_entries.id"), nullable=True)
     description: Mapped[str] = mapped_column(Text, nullable=True)
     entry_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -52,9 +53,13 @@ class BankStatementLine(Base):
     line_number: Mapped[int] = mapped_column(Integer, nullable=False)
     student_id: Mapped[int] = mapped_column(Integer, nullable=True)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
+    reference_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    payment_method: Mapped[str | None] = mapped_column(String(40), nullable=True)
     statement_date: Mapped[date] = mapped_column(Date, nullable=False)
     raw_line: Mapped[str] = mapped_column(Text, nullable=False)
     matched: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    matched_entry_id: Mapped[int | None] = mapped_column(ForeignKey("ledger_entries.id"), nullable=True)
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class ReconciliationReport(Base):
@@ -64,4 +69,7 @@ class ReconciliationReport(Base):
     import_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     matched_total: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     unmatched_total: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    statement_total: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    ledger_total: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    variance_total: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

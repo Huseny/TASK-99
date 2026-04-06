@@ -9,6 +9,7 @@ from app.core.database import get_db
 from app.core.logging import get_logger
 from app.core.security import token_hash
 from app.models.user import SessionToken, User, UserRole
+from app.services import auth_service
 
 bearer_scheme = HTTPBearer(auto_error=False)
 logger = get_logger("app.auth")
@@ -41,9 +42,7 @@ def get_current_session(
         absolute_expiry = absolute_expiry.replace(tzinfo=timezone.utc)
 
     if now > absolute_expiry:
-        session.revoked = True
-        session.revoked_at = now
-        db.commit()
+        auth_service.revoke_session(db, session, at=now)
         logger.info(
             "session_expired_absolute",
             extra={"event": "auth.session.expired_absolute", "fields": {"session_id": session.id, "user_id": session.user_id}},
@@ -52,9 +51,7 @@ def get_current_session(
 
     idle_delta = timedelta(seconds=settings.session_idle_timeout)
     if now > (last_active + idle_delta):
-        session.revoked = True
-        session.revoked_at = now
-        db.commit()
+        auth_service.revoke_session(db, session, at=now)
         logger.info(
             "session_expired_idle",
             extra={"event": "auth.session.expired_idle", "fields": {"session_id": session.id, "user_id": session.user_id}},

@@ -15,7 +15,8 @@
 4. Open frontend:
    - `http://localhost:5173`
 
-Docker compose includes safe defaults for required backend settings; CI can override any value using environment variables.
+Docker compose includes development-safe defaults for required backend settings; CI can override any value using environment variables.
+`SECRET_KEY` must be at least 24 characters long and must not use weak placeholder values. The provided default is suitable for local development only and should be overridden in shared or production environments.
 
 ## Local Setup (No Docker)
 - Backend prerequisites:
@@ -38,7 +39,7 @@ Docker compose includes safe defaults for required backend settings; CI can over
 - Local backend (no Docker):
   - `cd backend`
   - `python -m pytest unit_tests/ -v --tb=short`
-  - `python -m pytest API_tests/ -v --tb=short -k "not test_waitlist_drop_backfill_status_history"`
+  - `python -m pytest API_tests/ -v --tb=short`
 - Local frontend checks (no Docker):
   - `cd frontend`
   - `npm run test`
@@ -62,3 +63,4 @@ Docker compose includes safe defaults for required backend settings; CI can over
 - The backend runs Alembic migrations at startup.
 - The frontend is served by an independent `web` container.
 - Audit retention policy is 7 years with archive-then-purge, runnable by admin via `POST /api/v1/admin/audit-log/retention`.
+- If `SECRET_KEY` is missing or invalid, the API fails fast during startup with a configuration error.

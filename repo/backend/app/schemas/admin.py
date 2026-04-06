@@ -88,7 +88,7 @@ class UserOut(BaseModel):
 
 class AuditLogOut(BaseModel):
     id: int
-    actor_id: int
+    actor_id: int | None
     action: str
     entity_name: str
     entity_id: int | None

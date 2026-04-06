@@ -10,15 +10,15 @@ from app.models.registration import Enrollment, EnrollmentStatus
 from app.models.user import User, UserRole
 
 
-def _create_user(db: Session, username: str, role: UserRole, password: str) -> User:
-    user = User(username=username, password_hash=hash_password(password), role=role, is_active=True)
+def _create_user(db: Session, username: str, role: UserRole, password: str, org_id: int | None = None) -> User:
+    user = User(username=username, password_hash=hash_password(password), role=role, is_active=True, org_id=org_id)
     db.add(user)
     db.commit()
     db.refresh(user)
     return user
 
 
-def _seed_round_context(db: Session) -> tuple[int, int]:
+def _seed_round_context(db: Session) -> tuple[int, int, int]:
     organization = Organization(name="Messaging Org", code="MORG", is_active=True)
     db.add(organization)
     db.flush()
@@ -31,11 +31,16 @@ def _seed_round_context(db: Session) -> tuple[int, int]:
     section = Section(course_id=course.id, term_id=term.id, code="M1", instructor_id=None, capacity=40)
     db.add(section)
     db.commit()
-    return term.id, section.id
+    return organization.id, term.id, section.id
 
 
 def _grant_section_scope(db: Session, user_id: int, section_id: int) -> None:
     db.add(ScopeGrant(user_id=user_id, scope_type=ScopeType.section, scope_id=section_id))
+    db.commit()
+
+
+def _grant_org_scope(db: Session, user_id: int, org_id: int) -> None:
+    db.add(ScopeGrant(user_id=user_id, scope_type=ScopeType.organization, scope_id=org_id))
     db.commit()
 
 
@@ -51,8 +56,9 @@ def _login(client, username: str, password: str) -> dict[str, str]:
 
 
 def test_dispatch_list_unread_and_mark_read(client, db_session: Session) -> None:
-    instructor = _create_user(db_session, "msg_instructor", UserRole.instructor, "InstructorPass1!")
-    student = _create_user(db_session, "msg_student", UserRole.student, "StudentPass1!")
+    instructor = _create_user(db_session, "msg_instructor", UserRole.instructor, "InstructorPass1!", org_id=11)
+    student = _create_user(db_session, "msg_student", UserRole.student, "StudentPass1!", org_id=11)
+    _grant_org_scope(db_session, instructor.id, 11)
 
     instructor_headers = _login(client, "msg_instructor", "InstructorPass1!")
     student_headers = _login(client, "msg_student", "StudentPass1!")
@@ -86,9 +92,10 @@ def test_dispatch_list_unread_and_mark_read(client, db_session: Session) -> None
 
 
 def test_mark_read_denied_for_non_owner_and_dispatch_rbac(client, db_session: Session) -> None:
-    instructor = _create_user(db_session, "msg_instructor2", UserRole.instructor, "InstructorPass1!")
-    student_a = _create_user(db_session, "msg_student_a", UserRole.student, "StudentPass1!")
-    student_b = _create_user(db_session, "msg_student_b", UserRole.student, "StudentPass1!")
+    instructor = _create_user(db_session, "msg_instructor2", UserRole.instructor, "InstructorPass1!", org_id=21)
+    student_a = _create_user(db_session, "msg_student_a", UserRole.student, "StudentPass1!", org_id=21)
+    student_b = _create_user(db_session, "msg_student_b", UserRole.student, "StudentPass1!", org_id=22)
+    _grant_org_scope(db_session, instructor.id, 21)
 
     instructor_headers = _login(client, "msg_instructor2", "InstructorPass1!")
     student_a_headers = _login(client, "msg_student_a", "StudentPass1!")
@@ -111,6 +118,18 @@ def test_mark_read_denied_for_non_owner_and_dispatch_rbac(client, db_session: Se
 
     forbidden_read = client.patch(f"/api/v1/messaging/notifications/{notification_id}/read", headers=student_b_headers)
     assert forbidden_read.status_code == 404
+
+    cross_scope_dispatch = client.post(
+        "/api/v1/messaging/dispatch",
+        json={
+            "trigger_type": "GRADING_COMPLETED",
+            "title": "Grades Ready",
+            "message": "Your grading cycle is complete.",
+            "recipient_ids": [student_a.id, student_b.id],
+        },
+        headers=instructor_headers,
+    )
+    assert cross_scope_dispatch.status_code == 403
 
     forbidden_dispatch = client.post(
         "/api/v1/messaging/dispatch",
@@ -187,8 +206,9 @@ def test_review_events_emit_assignment_and_grading_notifications(client, db_sess
     instructor = _create_user(db_session, "msg_review_inst", UserRole.instructor, "InstructorPass1!")
     reviewer = _create_user(db_session, "msg_review_rev", UserRole.reviewer, "ReviewerPass1!")
     student = _create_user(db_session, "msg_review_student", UserRole.student, "StudentPass1!")
-    term_id, section_id = _seed_round_context(db_session)
+    org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
     _enroll_user_in_section(db_session, student.id, section_id)
 
     instructor_headers = _login(client, "msg_review_inst", "InstructorPass1!")
@@ -197,7 +217,7 @@ def test_review_events_emit_assignment_and_grading_notifications(client, db_sess
 
     form = client.post(
         "/api/v1/reviews/forms",
-        json={"name": "Msg Form", "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
+        json={"name": "Msg Form", "organization_id": org_id, "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}]},
         headers=instructor_headers,
     )
     assert form.status_code == 200

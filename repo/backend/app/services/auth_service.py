@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import secrets
 
 from fastapi import HTTPException, status
 from sqlalchemy import desc
@@ -75,11 +76,17 @@ def login(db: Session, username: str, password: str) -> tuple[str, SessionToken]
     return raw_token, session
 
 
+def revoke_session(db: Session, session: SessionToken, *, at: datetime | None = None, commit: bool = True) -> None:
+    revoked_at = at or _utcnow()
+    session.revoked = True
+    session.revoked_at = revoked_at
+    if commit:
+        db.commit()
+
+
 def logout(db: Session, session: SessionToken) -> None:
     if not session.revoked:
-        session.revoked = True
-        session.revoked_at = _utcnow()
-        db.commit()
+        revoke_session(db, session)
 
 
 def change_password(db: Session, user: User, current_password: str, new_password: str) -> None:
@@ -101,15 +108,33 @@ def change_password(db: Session, user: User, current_password: str, new_password
 
 
 def create_seed_admin(db: Session) -> None:
-    existing = db.query(User).filter(User.username == "admin").first()
-    if existing is not None:
-        return
-    db.add(
-        User(
-            username="admin",
-            password_hash=hash_password("Admin1234!@#$"),
-            role=UserRole.admin,
-            is_active=True,
-        )
+    return None
+
+
+def bootstrap_admin(db: Session, *, username: str, password: str, bootstrap_token: str) -> User:
+    configured_token = settings.bootstrap_admin_token
+    if not configured_token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin bootstrap is not enabled.")
+    if not secrets.compare_digest(bootstrap_token, configured_token):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid bootstrap token.")
+    existing_admin = db.query(User).filter(User.role == UserRole.admin).first()
+    if existing_admin is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Admin bootstrap has already been completed.")
+    existing_username = db.query(User).filter(User.username == username).first()
+    if existing_username is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username is already in use.")
+
+    valid, reason = validate_password_complexity(password)
+    if not valid:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=reason)
+
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        role=UserRole.admin,
+        is_active=True,
     )
+    db.add(user)
     db.commit()
+    db.refresh(user)
+    return user

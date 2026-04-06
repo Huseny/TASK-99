@@ -32,6 +32,7 @@ def dispatch(payload: TriggerDispatchIn, db: Session = Depends(get_db), user: Us
         raise HTTPException(status_code=403, detail="Forbidden")
     result = messaging_service.dispatch_notifications(
         db,
+        actor=user,
         trigger_type=payload.trigger_type,
         title=payload.title,
         message=payload.message,

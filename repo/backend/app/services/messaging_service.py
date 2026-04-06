@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
+from app.core.authz import check_scope_access
 from app.core.database import SessionLocal
 from app.core.logging import get_logger
 from app.models.messaging import (
@@ -16,6 +17,7 @@ from app.models.messaging import (
     NotificationTrigger,
     NotificationTriggerConfig,
 )
+from app.models.user import User, UserRole
 
 logger = get_logger("app.messaging")
 
@@ -111,6 +113,28 @@ def _config_map(db: Session) -> dict[NotificationTrigger, NotificationTriggerCon
     return {row.trigger_type: row for row in rows}
 
 
+def _ensure_dispatch_actor(actor: User) -> None:
+    if actor.role not in {UserRole.admin, UserRole.instructor, UserRole.finance_clerk}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def _validate_recipient_scope(db: Session, actor: User, recipient_ids: list[int]) -> list[int]:
+    unique_recipients = sorted(set(recipient_ids))
+    if actor.role == UserRole.admin:
+        existing_count = db.query(func.count(User.id)).filter(User.id.in_(unique_recipients)).scalar()
+        if int(existing_count or 0) != len(unique_recipients):
+            raise HTTPException(status_code=404, detail="One or more recipients were not found.")
+        return unique_recipients
+
+    recipients = db.query(User).filter(User.id.in_(unique_recipients)).all()
+    if len(recipients) != len(unique_recipients):
+        raise HTTPException(status_code=404, detail="One or more recipients were not found.")
+    for recipient in recipients:
+        if not check_scope_access(db, actor, recipient):
+            raise HTTPException(status_code=403, detail="One or more recipients are outside your allowed scope.")
+    return unique_recipients
+
+
 def _create_notification(
     db: Session,
     *,
@@ -177,19 +201,21 @@ def _queue_deadline_reminders(
 def dispatch_notifications(
     db: Session,
     *,
+    actor: User,
     trigger_type: str,
     title: str,
     message: str,
     recipient_ids: list[int],
     metadata: dict | None = None,
 ) -> dict:
+    _ensure_dispatch_actor(actor)
     trigger = _parse_trigger(trigger_type)
     config_map = _config_map(db)
     trigger_config = config_map[trigger]
     if not trigger_config.enabled:
         return {"created": 0, "notification_ids": [], "queued": 0}
 
-    unique_recipients = sorted(set(recipient_ids))
+    unique_recipients = _validate_recipient_scope(db, actor, recipient_ids)
     created_ids: list[int] = []
     for recipient_id in unique_recipients:
         created_ids.append(

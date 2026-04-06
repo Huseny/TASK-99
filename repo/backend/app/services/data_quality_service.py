@@ -5,10 +5,14 @@ from difflib import SequenceMatcher
 
 from fastapi import HTTPException
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.models.admin import Course, Section
 from app.models.data_quality import QuarantineEntry, QuarantineStatus
+from app.models.review import ScoringForm
+from app.models.user import User
 
 
 def _utcnow() -> datetime:
@@ -22,6 +26,101 @@ def _fingerprint(payload: dict) -> str:
 
 def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
+
+
+def _domain_candidate_values(db: Session, entity_type: str, key: str, payload: dict) -> list[str]:
+    if entity_type == "AdminCourseWrite":
+        title_query = db.query(Course.title).filter(Course.organization_id == payload.get("organization_id"))
+        code_query = db.query(Course.code).filter(Course.organization_id == payload.get("organization_id"))
+        if payload.get("existing_entity_id") is not None:
+            title_query = title_query.filter(Course.id != payload["existing_entity_id"])
+            code_query = code_query.filter(Course.id != payload["existing_entity_id"])
+        if key == "title":
+            return [str(row[0]) for row in title_query.all() if row[0]]
+        if key == "code":
+            return [str(row[0]) for row in code_query.all() if row[0]]
+    if entity_type == "AdminSectionWrite" and key == "code":
+        query = db.query(Section.code).filter(Section.term_id == payload.get("term_id"))
+        if payload.get("existing_entity_id") is not None:
+            query = query.filter(Section.id != payload["existing_entity_id"])
+        rows = query.all()
+        return [str(row[0]) for row in rows if row[0]]
+    if entity_type == "AdminUserWrite" and key == "username":
+        query = db.query(User.username)
+        if payload.get("existing_entity_id") is not None:
+            query = query.filter(User.id != payload["existing_entity_id"])
+        rows = query.all()
+        return [str(row[0]) for row in rows if row[0]]
+    if entity_type in {"ReviewFormWrite", "IntegrationQbankFormWrite"} and key == "name":
+        query = db.query(ScoringForm.name)
+        org_id = payload.get("organization_id")
+        if org_id is not None:
+            query = query.filter(ScoringForm.organization_id == org_id)
+        rows = query.all()
+        return [str(row[0]) for row in rows if row[0]]
+    if entity_type == "IntegrationSISStudentWrite" and key == "username":
+        rows = db.query(User.username).filter(User.org_id == payload.get("org_id")).all()
+        return [str(row[0]) for row in rows if row[0]]
+    return []
+
+
+def _has_authoritative_duplicate(db: Session, entity_type: str, payload: dict, fingerprint: str) -> bool:
+    if entity_type == "AdminCourseWrite":
+        query = db.query(Course.id).filter(Course.organization_id == payload.get("organization_id"), Course.code == payload.get("code"))
+        if payload.get("existing_entity_id") is not None:
+            query = query.filter(Course.id != payload["existing_entity_id"])
+        return query.first() is not None
+    if entity_type == "AdminSectionWrite":
+        query = db.query(Section.id).filter(Section.term_id == payload.get("term_id"), Section.code == payload.get("code"))
+        if payload.get("existing_entity_id") is not None:
+            query = query.filter(Section.id != payload["existing_entity_id"])
+        return query.first() is not None
+    if entity_type == "AdminUserWrite":
+        query = db.query(User.id).filter(User.username == payload.get("username"))
+        if payload.get("existing_entity_id") is not None:
+            query = query.filter(User.id != payload["existing_entity_id"])
+        return query.first() is not None
+    if entity_type == "ReviewFormWrite":
+        return db.query(ScoringForm.id).filter(ScoringForm.name == payload.get("name")).first() is not None
+    if entity_type == "IntegrationSISStudentWrite":
+        source_client_id = payload.get("source_client_id")
+        external_id = payload.get("external_id")
+        username = payload.get("username")
+        if source_client_id and external_id:
+            if (
+                db.query(User.id)
+                .filter(User.source_client_id == source_client_id, User.external_id == external_id)
+                .first()
+                is not None
+            ):
+                return True
+        if username:
+            return (
+                db.query(User.id)
+                .filter(
+                    User.username == username,
+                    User.org_id == payload.get("org_id"),
+                    User.source_client_id != source_client_id if source_client_id else True,
+                )
+                .first()
+                is not None
+            )
+    if entity_type == "IntegrationQbankFormWrite":
+        source_client_id = payload.get("source_client_id")
+        external_id = payload.get("external_id")
+        if source_client_id and external_id:
+            return (
+                db.query(ScoringForm.id)
+                .filter(ScoringForm.source_client_id == source_client_id, ScoringForm.external_id == external_id)
+                .first()
+                is not None
+            )
+    existing_fingerprint = (
+        db.query(QuarantineEntry)
+        .filter(QuarantineEntry.entity_type == entity_type, QuarantineEntry.fingerprint == fingerprint)
+        .first()
+    )
+    return existing_fingerprint is not None
 
 
 def evaluate_payload(
@@ -61,19 +160,22 @@ def evaluate_payload(
             score -= 15
 
     fingerprint = _fingerprint(payload)
-    existing_fingerprint = (
-        db.query(QuarantineEntry)
-        .filter(QuarantineEntry.entity_type == entity_type, QuarantineEntry.fingerprint == fingerprint)
-        .first()
-    )
-    if existing_fingerprint is not None:
-        reasons.append("Duplicate fingerprint detected")
+    if _has_authoritative_duplicate(db, entity_type, payload, fingerprint):
+        reasons.append("Duplicate record detected")
         score -= 20
 
     for key in unique_keys:
         if key not in payload:
             continue
         value = str(payload[key])
+        authoritative_candidates = _domain_candidate_values(db, entity_type, key, payload)
+        for candidate in authoritative_candidates:
+            if candidate and _similarity(value.lower(), candidate.lower()) >= settings.dedup_threshold:
+                reasons.append(f"Potential duplicate by similarity on '{key}'")
+                score -= 15
+                break
+        if any("Potential duplicate by similarity" in reason for reason in reasons):
+            continue
         similar_rows = (
             db.query(QuarantineEntry)
             .filter(QuarantineEntry.entity_type == entity_type)
@@ -205,3 +307,11 @@ def quality_report(db: Session) -> list[dict]:
             }
         )
     return result
+
+
+def flush_or_raise_conflict(db: Session, *, detail: str = "Duplicate record detected.") -> None:
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=detail) from exc

@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://cems:cems@db:5432/cems}
-      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-before-prod-2026}
       BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
       SESSION_IDLE_TIMEOUT: ${SESSION_IDLE_TIMEOUT:-28800}
       SESSION_ABSOLUTE_TIMEOUT: ${SESSION_ABSOLUTE_TIMEOUT:-86400}

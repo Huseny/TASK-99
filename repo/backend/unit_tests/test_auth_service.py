@@ -4,9 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
+from app.core.config import settings
 from app.core.security import hash_password, validate_password_complexity
 from app.models.user import LoginAttempt, User, UserRole
-from app.services.auth_service import is_locked_out
+from app.services.auth_service import bootstrap_admin, is_locked_out
 
 
 def _make_db():
@@ -55,3 +56,15 @@ def test_user_password_hash() -> None:
     db.add(user)
     db.commit()
     assert user.id is not None
+
+
+def test_bootstrap_admin_hashes_password() -> None:
+    db = _make_db()
+    original_token = settings.bootstrap_admin_token
+    settings.bootstrap_admin_token = "unit-bootstrap"
+    try:
+        admin = bootstrap_admin(db, username="root_admin", password="StrongPass123!", bootstrap_token="unit-bootstrap")
+        assert admin.role == UserRole.admin
+        assert admin.password_hash != "StrongPass123!"
+    finally:
+        settings.bootstrap_admin_token = original_token

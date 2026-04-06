@@ -27,5 +27,11 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=12, max_length=256)
 
 
+class BootstrapAdminRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=12, max_length=256)
+    bootstrap_token: str = Field(min_length=1, max_length=512)
+
+
 class MessageResponse(BaseModel):
     message: str

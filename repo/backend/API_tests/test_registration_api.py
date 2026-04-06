@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
+import json
 
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
 from app.models.access import ScopeGrant, ScopeType
-from app.models.admin import Course, Organization, RegistrationRound, Section, Term
+from app.models.admin import AuditLog, Course, Organization, RegistrationRound, Section, Term
 from app.models.registration import AddDropRequest, Enrollment, EnrollmentStatus
 from app.models.user import User, UserRole
 
@@ -55,6 +56,11 @@ def _seed_catalog(db: Session, with_active_round: bool = True, org_code: str = "
 
 def _grant_org_scope(db: Session, user_id: int, org_id: int) -> None:
     db.add(ScopeGrant(user_id=user_id, scope_type=ScopeType.organization, scope_id=org_id))
+    db.commit()
+
+
+def _grant_section_scope(db: Session, user_id: int, section_id: int) -> None:
+    db.add(ScopeGrant(user_id=user_id, scope_type=ScopeType.section, scope_id=section_id))
     db.commit()
 
 
@@ -258,6 +264,78 @@ def test_registration_writes_forbidden_for_non_student_roles(client, db_session:
             headers={**headers, "Idempotency-Key": f"drop-{role.value}"},
         )
         assert drop_response.status_code == 403
+
+
+def test_roster_management_requires_scope_and_supports_instructor_actions(client, db_session: Session) -> None:
+    org_id, _, _, prereq_section_id, target_section_id = _seed_catalog(db_session, org_code="ORGROSTER")
+    instructor = _create_user(db_session, "roster_inst", UserRole.instructor, "InstructorPass123!", org_id=org_id)
+    outsider = _create_user(db_session, "roster_outsider", UserRole.instructor, "InstructorPass123!", org_id=org_id)
+    student = _create_user(db_session, "roster_student", UserRole.student, "StudentPass123!", org_id=org_id)
+    db_session.add(Enrollment(student_id=student.id, section_id=prereq_section_id, status=EnrollmentStatus.completed))
+    db_session.commit()
+    _grant_section_scope(db_session, instructor.id, target_section_id)
+
+    instructor_headers = _login(client, "roster_inst", "InstructorPass123!")
+    outsider_headers = _login(client, "roster_outsider", "InstructorPass123!")
+
+    before_denied_count = db_session.query(AuditLog).filter(AuditLog.action.like("registration.roster.%")).count()
+    denied = client.get(f"/api/v1/sections/{target_section_id}/roster", headers=outsider_headers)
+    assert denied.status_code == 403
+    after_denied_count = db_session.query(AuditLog).filter(AuditLog.action.like("registration.roster.%")).count()
+    assert before_denied_count == after_denied_count
+
+    add_audit_before = db_session.query(AuditLog).filter(AuditLog.action == "registration.roster.add").count()
+    add = client.post(f"/api/v1/sections/{target_section_id}/roster", json={"student_id": student.id}, headers=instructor_headers)
+    assert add.status_code == 200
+    db_session.expire_all()
+    add_audit_after = db_session.query(AuditLog).filter(AuditLog.action == "registration.roster.add").count()
+    assert add_audit_after == add_audit_before + 1
+    add_audit = db_session.query(AuditLog).filter(AuditLog.action == "registration.roster.add").order_by(AuditLog.id.desc()).first()
+    assert add_audit is not None
+    assert add_audit.actor_id == instructor.id
+    assert add_audit.entity_name == "section_roster"
+    assert add_audit.entity_id == target_section_id
+    assert add_audit.metadata_json is not None
+    assert json.loads(add_audit.metadata_json) == {"student_id": student.id}
+    assert add_audit.before_hash is not None
+    assert add_audit.after_hash is not None
+    assert add_audit.before_hash != add_audit.after_hash
+
+    roster = client.get(f"/api/v1/sections/{target_section_id}/roster", headers=instructor_headers)
+    assert roster.status_code == 200
+    assert any(item["student_id"] == student.id and item["status"] == "ENROLLED" for item in roster.json())
+
+    remove_audit_before = db_session.query(AuditLog).filter(AuditLog.action == "registration.roster.remove").count()
+    remove = client.delete(f"/api/v1/sections/{target_section_id}/roster/{student.id}", headers=instructor_headers)
+    assert remove.status_code == 200
+    db_session.expire_all()
+    remove_audit_after = db_session.query(AuditLog).filter(AuditLog.action == "registration.roster.remove").count()
+    assert remove_audit_after == remove_audit_before + 1
+    remove_audit = db_session.query(AuditLog).filter(AuditLog.action == "registration.roster.remove").order_by(AuditLog.id.desc()).first()
+    assert remove_audit is not None
+    assert remove_audit.actor_id == instructor.id
+    assert remove_audit.entity_name == "section_roster"
+    assert remove_audit.entity_id == target_section_id
+    assert remove_audit.metadata_json is not None
+    assert json.loads(remove_audit.metadata_json) == {"student_id": student.id}
+    assert remove_audit.before_hash is not None
+    assert remove_audit.after_hash is not None
+    assert remove_audit.before_hash != remove_audit.after_hash
+
+
+def test_unauthorized_roster_mutation_creates_no_audit_log(client, db_session: Session) -> None:
+    org_id, _, _, prereq_section_id, target_section_id = _seed_catalog(db_session, org_code="ORGROSTERDENY")
+    instructor = _create_user(db_session, "roster_denied_inst", UserRole.instructor, "InstructorPass123!", org_id=org_id)
+    student = _create_user(db_session, "roster_denied_student", UserRole.student, "StudentPass123!", org_id=org_id)
+    db_session.add(Enrollment(student_id=student.id, section_id=prereq_section_id, status=EnrollmentStatus.completed))
+    db_session.commit()
+
+    headers = _login(client, "roster_denied_inst", "InstructorPass123!")
+    before_count = db_session.query(AuditLog).filter(AuditLog.action.like("registration.roster.%")).count()
+    response = client.post(f"/api/v1/sections/{target_section_id}/roster", json={"student_id": student.id}, headers=headers)
+    assert response.status_code == 403
+    after_count = db_session.query(AuditLog).filter(AuditLog.action.like("registration.roster.%")).count()
+    assert before_count == after_count
 
 
 def test_registration_scope_denies_cross_org_enrollment(client, db_session: Session) -> None:

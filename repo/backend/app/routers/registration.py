@@ -16,6 +16,9 @@ from app.schemas.registration import (
     EnrollRequest,
     HistoryItem,
     RegistrationStatusItem,
+    RosterAddRequest,
+    RosterItem,
+    RosterRemoveRequest,
     WaitlistRequest,
 )
 from app.services import registration_service
@@ -147,3 +150,27 @@ def registration_history(db: Session = Depends(get_db), user: User = Depends(get
         HistoryItem(id=row.id, section_id=row.section_id, event_type=row.event_type, details=row.details, created_at=row.created_at)
         for row in rows
     ]
+
+
+@router.get("/sections/{section_id}/roster", response_model=list[RosterItem])
+def section_roster(section_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    return [RosterItem(**row) for row in registration_service.list_roster(db, user, section_id)]
+
+
+@router.post("/sections/{section_id}/roster")
+def add_roster_student(
+    section_id: int,
+    payload: RosterAddRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if payload.student_id <= 0:
+        raise HTTPException(status_code=422, detail="student_id must be positive.")
+    return registration_service.add_student_to_roster(db, user, section_id, payload.student_id)
+
+
+@router.delete("/sections/{section_id}/roster/{student_id}")
+def remove_roster_student(section_id: int, student_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    if student_id <= 0:
+        raise HTTPException(status_code=422, detail="student_id must be positive.")
+    return registration_service.remove_student_from_roster(db, user, section_id, student_id)
