@@ -25,7 +25,7 @@ def test_settings_reject_wildcard_cors_and_weak_secret() -> None:
 
 
 def test_documented_default_secret_meets_validation_requirements() -> None:
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[1]
     env_example = (repo_root / ".env.example").read_text(encoding="utf-8")
     secret_line = next(line for line in env_example.splitlines() if line.startswith("SECRET_KEY="))
     secret_value = secret_line.split("=", 1)[1]
