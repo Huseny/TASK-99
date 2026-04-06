@@ -259,6 +259,28 @@ def _ensure_client_org(client: IntegrationClient) -> int:
     return int(client.organization_id)
 
 
+def _enforce_quality_without_commit(
+    db: Session,
+    *,
+    entity_type: str,
+    payload: dict,
+    required_fields: list[str],
+    unique_keys: list[str],
+) -> None:
+    accepted, score, reasons, _ = data_quality_service.evaluate_payload(
+        db,
+        entity_type=entity_type,
+        payload=payload,
+        required_fields=required_fields,
+        ranges={},
+        unique_keys=unique_keys,
+    )
+    if accepted:
+        return
+    status_code = 409 if any("duplicate" in reason.lower() for reason in reasons) else 422
+    raise HTTPException(status_code=status_code, detail={"accepted": False, "quality_score": score, "reasons": reasons})
+
+
 def sync_students(db: Session, *, client: IntegrationClient, import_id: str, body: bytes, students: list[dict]) -> dict:
     organization_id = _ensure_client_org(client)
     existing = _register_import(db, client=client, import_type="sis.students", import_id=import_id, body=body)
@@ -280,7 +302,7 @@ def sync_students(db: Session, *, client: IntegrationClient, import_id: str, bod
             "source_client_id": client.client_id,
         }
         if row is None:
-            data_quality_service.enforce_write_quality(
+            _enforce_quality_without_commit(
                 db,
                 entity_type="IntegrationSISStudentWrite",
                 payload=quality_payload,
@@ -292,14 +314,10 @@ def sync_students(db: Session, *, client: IntegrationClient, import_id: str, bod
             .filter(
                 User.username == item["username"],
                 User.org_id == organization_id,
-                ~(
-                    (User.source_client_id == client.client_id)
-                    & (User.external_id == item["external_id"])
-                ),
             )
             .first()
         )
-        if conflicting_username is not None:
+        if conflicting_username is not None and row is None:
             raise HTTPException(status_code=409, detail=f"Username '{item['username']}' is already assigned in this organization.")
         if row is None:
             row = User(
@@ -352,7 +370,7 @@ def import_forms(db: Session, *, client: IntegrationClient, import_id: str, body
             "source_client_id": client.client_id,
         }
         if row is None:
-            data_quality_service.enforce_write_quality(
+            _enforce_quality_without_commit(
                 db,
                 entity_type="IntegrationQbankFormWrite",
                 payload=quality_payload,

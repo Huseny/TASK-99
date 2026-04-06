@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
+from app.core.config import settings
 from app.core.security import hash_password
 from app.models.admin import Course, Organization, RegistrationRound, Section, Term
 from app.models.registration import Enrollment, EnrollmentStatus
@@ -15,13 +16,23 @@ from app.models.user import User, UserRole
 from app.services import registration_service
 
 
-POSTGRES_TEST_DATABASE_URL = os.getenv("POSTGRES_TEST_DATABASE_URL")
+def _postgres_test_database_url() -> str | None:
+    explicit = os.getenv("POSTGRES_TEST_DATABASE_URL")
+    if explicit:
+        return explicit
+    configured = settings.database_url
+    if configured.startswith("postgresql"):
+        return configured
+    return None
 
 
 @pytest.mark.concurrent
-@pytest.mark.skipif(not POSTGRES_TEST_DATABASE_URL, reason="POSTGRES_TEST_DATABASE_URL is required for PostgreSQL concurrency testing.")
+@pytest.mark.postgres
 def test_parallel_enrollment_does_not_oversubscribe_capacity() -> None:
-    engine = create_engine(POSTGRES_TEST_DATABASE_URL)
+    database_url = _postgres_test_database_url()
+    if not database_url:
+        pytest.skip("Postgres required")
+    engine = create_engine(database_url)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
