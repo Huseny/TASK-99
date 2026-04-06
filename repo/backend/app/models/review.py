@@ -7,6 +7,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 
+def _enum_column(enum_cls: type[enum.Enum]) -> Enum:
+    return Enum(
+        enum_cls,
+        native_enum=False,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )
+
+
 class ReviewRoundStatus(str, enum.Enum):
     draft = "DRAFT"
     active = "ACTIVE"
@@ -46,8 +55,8 @@ class ReviewRound(Base):
     term_id: Mapped[int] = mapped_column(ForeignKey("terms.id"), nullable=False)
     section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False)
     scoring_form_id: Mapped[int] = mapped_column(ForeignKey("scoring_forms.id"), nullable=False)
-    identity_mode: Mapped[IdentityMode] = mapped_column(Enum(IdentityMode), nullable=False, default=IdentityMode.blind)
-    status: Mapped[ReviewRoundStatus] = mapped_column(Enum(ReviewRoundStatus), nullable=False, default=ReviewRoundStatus.draft)
+    identity_mode: Mapped[IdentityMode] = mapped_column(_enum_column(IdentityMode), nullable=False, default=IdentityMode.blind)
+    status: Mapped[ReviewRoundStatus] = mapped_column(_enum_column(ReviewRoundStatus), nullable=False, default=ReviewRoundStatus.draft)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -99,6 +108,6 @@ class RecheckRequest(Base):
     section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False)
     requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[RecheckStatus] = mapped_column(Enum(RecheckStatus), nullable=False, default=RecheckStatus.requested)
+    status: Mapped[RecheckStatus] = mapped_column(_enum_column(RecheckStatus), nullable=False, default=RecheckStatus.requested)
     assigned_reviewer_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

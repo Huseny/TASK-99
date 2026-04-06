@@ -4,7 +4,7 @@ import hmac
 import json
 import secrets
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, status
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -310,14 +310,14 @@ def sync_students(db: Session, *, client: IntegrationClient, import_id: str, bod
                 unique_keys=["username"],
             )
         conflicting_username = (
-            db.query(User.id)
+            db.query(User)
             .filter(
                 User.username == item["username"],
                 User.org_id == organization_id,
             )
             .first()
         )
-        if conflicting_username is not None and row is None:
+        if conflicting_username is not None and (row is None or conflicting_username.id != row.id):
             raise HTTPException(status_code=409, detail=f"Username '{item['username']}' is already assigned in this organization.")
         if row is None:
             row = User(

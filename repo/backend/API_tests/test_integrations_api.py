@@ -105,6 +105,36 @@ def test_sis_sync_persists_users_and_is_idempotent(client, db_session: Session) 
     assert all(row.actor_id is not None for row in sync_audit)
 
 
+def test_sis_sync_updates_existing_external_id_without_conflict(client, db_session: Session) -> None:
+    org = _create_org(db_session, "Integration Update Org", "INTUPD")
+    client_id, secret = _create_client(client, db_session, username="int_admin_update", org_id=org.id, name="SIS Update Connector")
+
+    path = "/api/v1/integrations/sis/students"
+    initial_payload = {
+        "import_id": "sis-update-1",
+        "students": [{"external_id": "S1", "username": "sis_student_1", "is_active": True}],
+    }
+    initial_body = json.dumps(initial_payload).encode("utf-8")
+    initial = client.post(path, data=initial_body, headers=_signed_headers(secret, client_id, path, initial_body, "update-nonce-1"))
+    assert initial.status_code == 200
+    assert initial.json()["created"] == 1
+
+    updated_payload = {
+        "import_id": "sis-update-2",
+        "students": [{"external_id": "S1", "username": "sis_student_1_renamed", "is_active": False}],
+    }
+    updated_body = json.dumps(updated_payload).encode("utf-8")
+    updated = client.post(path, data=updated_body, headers=_signed_headers(secret, client_id, path, updated_body, "update-nonce-2"))
+    assert updated.status_code == 200
+    assert updated.json()["updated"] == 1
+
+    db_session.expire_all()
+    stored = db_session.query(User).filter(User.source_client_id == client_id, User.external_id == "S1").first()
+    assert stored is not None
+    assert stored.username == "sis_student_1_renamed"
+    assert stored.is_active is False
+
+
 def test_qbank_import_persists_forms_and_rejects_duplicate_import_id_mismatch(client, db_session: Session) -> None:
     org = _create_org(db_session, "QBank Org", "QBORG")
     client_id, secret = _create_client(client, db_session, username="int_admin_qb", org_id=org.id, name="QBank Connector")

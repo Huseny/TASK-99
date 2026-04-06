@@ -76,8 +76,6 @@ def _enforce_review_write_quality(entity_type: str, payload: dict, db: Session) 
 @router.post("/forms")
 def create_scoring_form(payload: ScoringFormCreate, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _ensure_instructor_or_admin(user)
-    if user.role != UserRole.admin:
-        require_organization_access(db, user, payload.organization_id)
     _enforce_review_write_quality(
         "ReviewFormWrite",
         {"name": payload.name, "criteria_count": len(payload.criteria), "organization_id": payload.organization_id},

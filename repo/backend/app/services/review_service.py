@@ -124,9 +124,24 @@ def _get_assignment_student(db: Session, round_obj: ReviewRound, student_id: int
     return student
 
 
+def _reviewer_is_eligible_for_round(db: Session, reviewer: User, round_obj: ReviewRound) -> bool:
+    if can_access_section(db, reviewer, round_obj.section_id):
+        return True
+    same_section_membership = (
+        db.query(Enrollment.id)
+        .filter(
+            Enrollment.student_id == reviewer.id,
+            Enrollment.section_id == round_obj.section_id,
+            Enrollment.status.in_([EnrollmentStatus.enrolled, EnrollmentStatus.completed]),
+        )
+        .first()
+    )
+    return same_section_membership is not None
+
+
 def validate_assignment_participants(db: Session, round_obj: ReviewRound, reviewer_id: int, student_id: int) -> tuple[User, User]:
     reviewer = _get_assignment_reviewer(db, reviewer_id)
-    if not can_access_section(db, reviewer, round_obj.section_id):
+    if not _reviewer_is_eligible_for_round(db, reviewer, round_obj):
         raise HTTPException(status_code=403, detail="Assigned reviewer is outside the review round scope.")
     student = _get_assignment_student(db, round_obj, student_id)
     return reviewer, student
@@ -164,7 +179,7 @@ def auto_assign_reviewers(db: Session, round_obj: ReviewRound, student_ids: list
     all_reviewers = db.query(User).filter(User.role == UserRole.reviewer, User.is_active.is_(True)).all()
     if not all_reviewers:
         raise HTTPException(status_code=422, detail="No active reviewers available.")
-    reviewers = [row for row in all_reviewers if can_access_section(db, row, round_obj.section_id)]
+    reviewers = [row for row in all_reviewers if _reviewer_is_eligible_for_round(db, row, round_obj)]
     if not reviewers:
         raise HTTPException(status_code=403, detail="No reviewers are authorized for the review round scope.")
 

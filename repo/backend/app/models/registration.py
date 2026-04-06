@@ -7,6 +7,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 
+def _enum_column(enum_cls: type[enum.Enum]) -> Enum:
+    return Enum(
+        enum_cls,
+        native_enum=False,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )
+
+
 class EnrollmentStatus(str, enum.Enum):
     enrolled = "ENROLLED"
     dropped = "DROPPED"
@@ -20,7 +29,7 @@ class Enrollment(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False, index=True)
-    status: Mapped[EnrollmentStatus] = mapped_column(Enum(EnrollmentStatus), nullable=False, default=EnrollmentStatus.enrolled)
+    status: Mapped[EnrollmentStatus] = mapped_column(_enum_column(EnrollmentStatus), nullable=False, default=EnrollmentStatus.enrolled)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

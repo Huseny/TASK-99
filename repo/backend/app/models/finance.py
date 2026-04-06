@@ -7,6 +7,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 
+def _enum_column(enum_cls: type[enum.Enum]) -> Enum:
+    return Enum(
+        enum_cls,
+        native_enum=False,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )
+
+
 class EntryType(str, enum.Enum):
     charge = "CHARGE"
     payment = "PAYMENT"
@@ -34,9 +43,9 @@ class LedgerEntry(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[int] = mapped_column(ForeignKey("ledger_accounts.id"), nullable=False, index=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    entry_type: Mapped[EntryType] = mapped_column(Enum(EntryType), nullable=False)
+    entry_type: Mapped[EntryType] = mapped_column(_enum_column(EntryType), nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
-    instrument: Mapped[PaymentInstrument] = mapped_column(Enum(PaymentInstrument), nullable=True)
+    instrument: Mapped[PaymentInstrument] = mapped_column(_enum_column(PaymentInstrument), nullable=True)
     external_reference_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
     reference_entry_id: Mapped[int] = mapped_column(ForeignKey("ledger_entries.id"), nullable=True)
     description: Mapped[str] = mapped_column(Text, nullable=True)

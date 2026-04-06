@@ -77,7 +77,7 @@ def get_user_scope_binding(db: Session, user: User) -> ScopeBinding:
         section_org_id = _section_org_id(db, section_id)
         if section_org_id is not None:
             organization_ids.add(section_org_id)
-    if user.org_id is not None:
+    if user.org_id is not None and user.role in {UserRole.student, UserRole.finance_clerk}:
         organization_ids.add(int(user.org_id))
     return ScopeBinding(
         organization_ids=organization_ids,

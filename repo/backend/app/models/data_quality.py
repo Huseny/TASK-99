@@ -7,6 +7,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 
+def _enum_column(enum_cls: type[enum.Enum]) -> Enum:
+    return Enum(
+        enum_cls,
+        native_enum=False,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )
+
+
 class QuarantineStatus(str, enum.Enum):
     open = "OPEN"
     accepted = "ACCEPTED"
@@ -22,7 +31,7 @@ class QuarantineEntry(Base):
     rejection_reason: Mapped[str] = mapped_column(Text, nullable=False)
     quality_score: Mapped[int] = mapped_column(Integer, nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    status: Mapped[QuarantineStatus] = mapped_column(Enum(QuarantineStatus), nullable=False, default=QuarantineStatus.open)
+    status: Mapped[QuarantineStatus] = mapped_column(_enum_column(QuarantineStatus), nullable=False, default=QuarantineStatus.open)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     resolved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_by: Mapped[int] = mapped_column(Integer, nullable=True)

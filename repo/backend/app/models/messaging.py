@@ -7,6 +7,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
 
+def _enum_column(enum_cls: type[enum.Enum]) -> Enum:
+    return Enum(
+        enum_cls,
+        native_enum=False,
+        values_callable=lambda members: [member.value for member in members],
+        validate_strings=True,
+    )
+
+
 class NotificationTrigger(str, enum.Enum):
     assignment_posted = "ASSIGNMENT_POSTED"
     deadline_72h = "DEADLINE_72H"
@@ -25,7 +34,7 @@ class NotificationTriggerConfig(Base):
     __tablename__ = "notification_trigger_configs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    trigger_type: Mapped[NotificationTrigger] = mapped_column(Enum(NotificationTrigger), nullable=False, unique=True)
+    trigger_type: Mapped[NotificationTrigger] = mapped_column(_enum_column(NotificationTrigger), nullable=False, unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     lead_hours: Mapped[int] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -36,7 +45,7 @@ class Notification(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    trigger_type: Mapped[NotificationTrigger] = mapped_column(Enum(NotificationTrigger), nullable=False)
+    trigger_type: Mapped[NotificationTrigger] = mapped_column(_enum_column(NotificationTrigger), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[str] = mapped_column(Text, nullable=True)
@@ -61,8 +70,10 @@ class NotificationSchedule(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    trigger_type: Mapped[NotificationTrigger] = mapped_column(Enum(NotificationTrigger), nullable=False)
-    status: Mapped[NotificationScheduleStatus] = mapped_column(Enum(NotificationScheduleStatus), nullable=False, default=NotificationScheduleStatus.pending)
+    trigger_type: Mapped[NotificationTrigger] = mapped_column(_enum_column(NotificationTrigger), nullable=False)
+    status: Mapped[NotificationScheduleStatus] = mapped_column(
+        _enum_column(NotificationScheduleStatus), nullable=False, default=NotificationScheduleStatus.pending
+    )
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[str] = mapped_column(Text, nullable=True)
