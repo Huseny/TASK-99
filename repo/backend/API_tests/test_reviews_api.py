@@ -470,7 +470,6 @@ def test_manual_assignment_rejects_invalid_reviewer_role(client, db_session: Ses
     org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
     _enroll_user_in_section(db_session, student.id, section_id)
-    _grant_section_scope(db_session, valid_reviewer.id, section_id)
 
     instructor_headers = _login(client, "inst_invalid_reviewer", "InstructorPass1!")
     form = client.post(
@@ -498,6 +497,7 @@ def test_manual_assignment_rejects_non_enrolled_student(client, db_session: Sess
     student = _create_user(db_session, "not_enrolled_student", UserRole.student, "StudentPass1!")
     org_id, term_id, section_id = _seed_round_context(db_session)
     _grant_section_scope(db_session, instructor.id, section_id)
+    _grant_section_scope(db_session, reviewer.id, section_id)
 
     instructor_headers = _login(client, "inst_non_enrolled", "InstructorPass1!")
     form = client.post(
