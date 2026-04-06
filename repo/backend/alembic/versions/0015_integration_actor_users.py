@@ -1,7 +1,7 @@
 """integration actor users
 
 Revision ID: 0015_integration_actor_users
-Revises: 0014_iteration2_integrations_dedup
+Revises: 0014_iter2_integrations_dedup
 Create Date: 2026-04-06 16:00:00
 """
 
@@ -9,7 +9,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0015_integration_actor_users"
-down_revision = "0014_iteration2_integrations_dedup"
+down_revision = "0014_iter2_integrations_dedup"
 branch_labels = None
 depends_on = None
 

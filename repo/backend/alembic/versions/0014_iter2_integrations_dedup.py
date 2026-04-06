@@ -1,6 +1,6 @@
 """iteration 2 integration and dedup hardening
 
-Revision ID: 0014_iteration2_integrations_dedup
+Revision ID: 0014_iter2_integrations_dedup
 Revises: 0013_nullable_audit_actor
 Create Date: 2026-04-06 14:00:00
 """
@@ -8,7 +8,7 @@ Create Date: 2026-04-06 14:00:00
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0014_iteration2_integrations_dedup"
+revision = "0014_iter2_integrations_dedup"
 down_revision = "0013_nullable_audit_actor"
 branch_labels = None
 depends_on = None
