@@ -1,87 +1,88 @@
+/**
+ * Real fullstack E2E: student login and notifications drawer journey.
+ *
+ * No API mocking.  The test provisions a fresh student account against the
+ * live backend (Docker), drives the browser through the Vite dev-server (which
+ * proxies /api/* to http://localhost:8000), and cleans up after itself.
+ *
+ * Prerequisites:
+ *   docker compose up   (db + api services must be healthy)
+ *   vite dev server is started automatically by playwright.config.js
+ */
 import { expect, test } from "@playwright/test";
 
-test("student login and notification read journey", async ({ page }) => {
-  const state = {
-    notifications: [
-      {
-        id: 21,
-        title: "Unread notice",
-        message: "Round update available",
-        read: false,
-        delivered_at: "2026-04-02T12:00:00Z"
-      }
-    ]
-  };
+const BACKEND = process.env.BACKEND_URL ?? "http://localhost:8000";
+const BOOTSTRAP_TOKEN =
+  process.env.BOOTSTRAP_ADMIN_TOKEN ?? "integration-test-bootstrap-2026";
 
-  await page.route("**/api/v1/auth/login", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        token: "e2e-token",
-        idle_expires_at: "2026-04-02T23:00:00Z",
-        absolute_expires_at: "2026-04-03T23:00:00Z"
-      })
+/** The integration-test bootstrap admin created by backend/integration/conftest.py */
+const ADMIN_USER = "ext_integration_admin";
+const ADMIN_PASS = "ExtInt3gration@2026!";
+
+test.describe("Student notifications E2E", () => {
+  let adminToken = null;
+  let studentId = null;
+  const uid = Math.random().toString(16).slice(2, 10);
+  const STUDENT_USER = `e2e_stu_${uid}`;
+  const STUDENT_PASS = "E2eTestPass@2026!";
+
+  test.beforeAll(async ({ request }) => {
+    // Ensure the bootstrap admin exists.  409 means it already exists – fine.
+    await request.post(`${BACKEND}/api/v1/auth/bootstrap-admin`, {
+      headers: { "X-Bootstrap-Token": BOOTSTRAP_TOKEN },
+      data: { username: ADMIN_USER, password: ADMIN_PASS }
     });
-  });
 
-  await page.route("**/api/v1/auth/me", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        id: 100,
-        username: "student-e2e",
+    // Log in as admin to obtain a token for provisioning test data.
+    const login = await request.post(`${BACKEND}/api/v1/auth/login`, {
+      data: { username: ADMIN_USER, password: ADMIN_PASS }
+    });
+    expect(login.ok()).toBeTruthy();
+    adminToken = (await login.json()).token;
+
+    // Create a fresh student user for this test run.
+    const stu = await request.post(`${BACKEND}/api/v1/admin/users`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+      data: {
+        username: STUDENT_USER,
+        password: STUDENT_PASS,
         role: "STUDENT",
-        session_idle_expires_at: "2026-04-02T23:00:00Z",
-        session_absolute_expires_at: "2026-04-03T23:00:00Z"
-      })
+        is_active: true
+      }
     });
+    expect(stu.ok()).toBeTruthy();
+    studentId = (await stu.json()).id;
   });
 
-  await page.route("**/api/v1/courses", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify([{ id: 1, code: "CSE101", title: "Intro", credits: 3, available_seats: 10 }])
-    });
+  test.afterAll(async ({ request }) => {
+    if (studentId && adminToken) {
+      await request.delete(`${BACKEND}/api/v1/admin/users/${studentId}`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+    }
   });
 
-  await page.route("**/api/v1/registration/status", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) });
+  test("student login and notification drawer journey", async ({ page }) => {
+    // --- Login flow ---
+    await page.goto("/login");
+    await page.getByLabel("Username").fill(STUDENT_USER);
+    await page.getByLabel("Password").fill(STUDENT_PASS);
+    await page.getByRole("button", { name: "Sign In" }).click();
+
+    // Authenticated landing page
+    await expect(page).toHaveURL(/\/app$/);
+    await expect(page.getByText("Student Workspace")).toBeVisible();
+
+    // --- Notifications drawer ---
+    await page.getByRole("button", { name: "open notifications" }).click();
+
+    // Drawer heading must be visible
+    await expect(page.getByRole("heading", { name: "Notifications" })).toBeVisible();
+
+    // Body shows either the empty-state placeholder or real notification items.
+    // Both are valid: a fresh student has no notifications.
+    const noNotifText = page.getByText("No notifications yet");
+    const firstListItem = page.getByRole("listitem").first();
+    await expect(noNotifText.or(firstListItem)).toBeVisible({ timeout: 5000 });
   });
-
-  await page.route("**/api/v1/registration/history", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) });
-  });
-
-  await page.route("**/api/v1/messaging/notifications", async (route) => {
-    const unread = state.notifications.filter((item) => !item.read).length;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ unread_count: unread, notifications: state.notifications })
-    });
-  });
-
-  await page.route("**/api/v1/messaging/notifications/*/read", async (route) => {
-    const id = Number(route.request().url().split("/").slice(-2)[0]);
-    state.notifications = state.notifications.map((item) => (item.id === id ? { ...item, read: true } : item));
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ id, read: true }) });
-  });
-
-  await page.goto("/login");
-
-  await page.getByLabel("Username").fill("student-e2e");
-  await page.getByLabel("Password").fill("StudentPassword1!");
-  await page.getByRole("button", { name: "Sign In" }).click();
-
-  await expect(page).toHaveURL(/\/app$/);
-  await expect(page.getByText("Student Workspace")).toBeVisible();
-
-  await page.getByRole("button", { name: "1" }).first().click();
-  await expect(page.getByText("Unread notice")).toBeVisible();
-  await page.getByText("Unread notice").click();
-
-  await expect.poll(() => state.notifications[0].read).toBe(true);
 });

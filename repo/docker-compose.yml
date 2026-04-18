@@ -39,6 +39,7 @@ services:
       MESSAGING_POLLER_ENABLED: ${MESSAGING_POLLER_ENABLED:-true}
       MESSAGING_POLLER_INTERVAL_SECONDS: ${MESSAGING_POLLER_INTERVAL_SECONDS:-30}
       INTEGRATION_SECRET_ENC_KEY: ${INTEGRATION_SECRET_ENC_KEY:-}
+      BOOTSTRAP_ADMIN_TOKEN: ${BOOTSTRAP_ADMIN_TOKEN:-integration-test-bootstrap-2026}
     depends_on:
       db:
         condition: service_healthy
@@ -60,6 +61,17 @@ services:
         condition: service_healthy
     ports:
       - "5173:80"
+
+  frontend-test:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.test
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8000
+      BACKEND_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   postgres_data:

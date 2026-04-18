@@ -254,6 +254,49 @@ def test_admin_course_write_rejected_by_data_quality(client, db_session: Session
     assert row.entity_type == "AdminCourseWrite"
 
 
+def test_admin_list_terms(client, db_session: Session) -> None:
+    """GET /api/v1/admin/terms – previously uncovered endpoint."""
+    _create_user(db_session, "admin_terms", UserRole.admin)
+    headers = _auth_headers(client, "admin_terms", "AdminPassword1!")
+
+    org = client.post("/api/v1/admin/organizations", json={"name": "Terms Org", "code": "TORG", "is_active": True}, headers=headers)
+    assert org.status_code == 200
+    org_id = org.json()["id"]
+
+    t1 = client.post(
+        "/api/v1/admin/terms",
+        json={"organization_id": org_id, "name": "Fall 2026", "starts_on": "2026-09-01", "ends_on": "2026-12-20", "is_active": True},
+        headers=headers,
+    )
+    assert t1.status_code == 200
+    t1_id = t1.json()["id"]
+
+    t2 = client.post(
+        "/api/v1/admin/terms",
+        json={"organization_id": org_id, "name": "Spring 2027", "starts_on": "2027-01-15", "ends_on": "2027-05-15", "is_active": False},
+        headers=headers,
+    )
+    assert t2.status_code == 200
+    t2_id = t2.json()["id"]
+
+    listing = client.get("/api/v1/admin/terms", headers=headers)
+    assert listing.status_code == 200
+    ids = [t["id"] for t in listing.json()]
+    assert t1_id in ids
+    assert t2_id in ids
+
+    term_a = next(t for t in listing.json() if t["id"] == t1_id)
+    assert term_a["name"] == "Fall 2026"
+    assert term_a["organization_id"] == org_id
+    assert term_a["is_active"] is True
+    assert term_a["starts_on"] == "2026-09-01"
+
+    # Non-admin must be denied
+    _create_user(db_session, "student_terms", UserRole.student, "StudentPassword1!")
+    student_headers = _auth_headers(client, "student_terms", "StudentPassword1!")
+    assert client.get("/api/v1/admin/terms", headers=student_headers).status_code == 403
+
+
 def test_admin_course_dedup_checks_authoritative_table(client, db_session: Session) -> None:
     _create_user(db_session, "admin_dup", UserRole.admin)
     headers = _auth_headers(client, "admin_dup", "AdminPassword1!")

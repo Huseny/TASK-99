@@ -414,3 +414,78 @@ def test_invalid_signature_does_not_consume_rate_limit(
         ),
     )
     assert over.status_code == 429
+
+
+def test_rotate_client_secret_returns_new_credentials_and_invalidates_old(
+    client, db_session: Session
+) -> None:
+    """POST /api/v1/integrations/clients/{client_id}/rotate-secret – previously uncovered."""
+    org = _create_org(db_session, "Rotate Org", "ROTORG")
+    client_id, original_secret = _create_client(
+        client, db_session, username="rot_admin", org_id=org.id, name="Rotate Connector"
+    )
+    admin_headers = _login(client, "rot_admin", "AdminPass1!")
+
+    rotate = client.post(
+        f"/api/v1/integrations/clients/{client_id}/rotate-secret",
+        headers=admin_headers,
+    )
+    assert rotate.status_code == 200
+    body = rotate.json()
+    assert body["client_id"] == client_id
+    new_secret = body["client_secret"]
+    assert new_secret
+    assert new_secret != original_secret
+
+    # New secret must work for signing requests
+    path = "/api/v1/integrations/qbank/forms"
+    valid_payload = json.dumps(
+        {
+            "import_id": "rotate-verify-1",
+            "forms": [
+                {
+                    "external_id": "RF1",
+                    "name": "Rotated Form",
+                    "criteria": [{"name": "Q", "weight": 1, "min": 0, "max": 5}],
+                }
+            ],
+        }
+    ).encode("utf-8")
+    signed_with_new = client.post(
+        path,
+        data=valid_payload,
+        headers=_signed_headers(new_secret, client_id, path, valid_payload, "rot-nonce-new"),
+    )
+    assert signed_with_new.status_code == 200
+
+    # Old secret must be rejected
+    signed_with_old = client.post(
+        path,
+        data=valid_payload,
+        headers=_signed_headers(original_secret, client_id, path, valid_payload, "rot-nonce-old"),
+    )
+    assert signed_with_old.status_code == 401
+
+
+def test_rotate_secret_returns_404_for_nonexistent_client(
+    client, db_session: Session
+) -> None:
+    _create_user(db_session, "admin_rot_404", UserRole.admin, "AdminPass1!")
+    headers = _login(client, "admin_rot_404", "AdminPass1!")
+
+    r = client.post(
+        "/api/v1/integrations/clients/nonexistent-client-xyz/rotate-secret",
+        headers=headers,
+    )
+    assert r.status_code == 404
+
+
+def test_rotate_secret_requires_admin_role(client, db_session: Session) -> None:
+    _create_user(db_session, "student_rot_rbac", UserRole.student, "StudentPassword1!")
+    student_headers = _login(client, "student_rot_rbac", "StudentPassword1!")
+
+    r = client.post(
+        "/api/v1/integrations/clients/any-client-id/rotate-secret",
+        headers=student_headers,
+    )
+    assert r.status_code == 403
