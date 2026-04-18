@@ -230,7 +230,7 @@ def test_eligibility_missing_prereq_and_missing_idempotency(client, db_session: 
     assert eligibility.json()["eligible"] is False
 
     enroll_missing_header = client.post("/api/v1/registration/enroll", json={"section_id": target_section_id}, headers=headers)
-    assert enroll_missing_header.status_code == 400
+    assert enroll_missing_header.status_code == 422
 
 
 def test_course_discovery_requires_auth(client, db_session: Session) -> None:
