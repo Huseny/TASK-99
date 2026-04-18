@@ -1053,7 +1053,7 @@ def test_registration_waitlist(base_url: str, auth_headers: dict) -> None:
 
         s1 = httpx.post(
             f"{base_url}/api/v1/admin/users",
-            json={"username": f"wls1_{uid}", "password": "WLStu@2026!", "role": "STUDENT", "is_active": True, "org_id": org_id},
+            json={"username": f"wls1_{uid}", "password": "WLStu@2026!!", "role": "STUDENT", "is_active": True, "org_id": org_id},
             headers=auth_headers,
             timeout=10,
         )
@@ -1062,15 +1062,15 @@ def test_registration_waitlist(base_url: str, auth_headers: dict) -> None:
 
         s2 = httpx.post(
             f"{base_url}/api/v1/admin/users",
-            json={"username": f"wls2_{uid}", "password": "WLStu@2026!", "role": "STUDENT", "is_active": True, "org_id": org_id},
+            json={"username": f"wls2_{uid}", "password": "WLStu@2026!!", "role": "STUDENT", "is_active": True, "org_id": org_id},
             headers=auth_headers,
             timeout=10,
         )
         assert s2.status_code == 200, s2.text
         stu2_id = s2.json()["id"]
 
-        stu1_hdrs = _login_as(base_url, f"wls1_{uid}", "WLStu@2026!")
-        stu2_hdrs = _login_as(base_url, f"wls2_{uid}", "WLStu@2026!")
+        stu1_hdrs = _login_as(base_url, f"wls1_{uid}", "WLStu@2026!!")
+        stu2_hdrs = _login_as(base_url, f"wls2_{uid}", "WLStu@2026!!")
 
         # Student 1 fills the seat
         enr1 = httpx.post(
@@ -1351,11 +1351,11 @@ def test_review_round_lifecycle(base_url: str, auth_headers: dict) -> None:
         assert inst.status_code == 200, inst.text
         inst_id = inst.json()["id"]
 
-        rev = httpx.post(f"{base_url}/api/v1/admin/users", json={"username": f"rv_rev_{uid}", "password": "RvRev@2026!", "role": "REVIEWER", "is_active": True}, headers=auth_headers, timeout=10)
+        rev = httpx.post(f"{base_url}/api/v1/admin/users", json={"username": f"rv_rev_{uid}", "password": "RvRev@2026!!", "role": "REVIEWER", "is_active": True}, headers=auth_headers, timeout=10)
         assert rev.status_code == 200, rev.text
         rev_id = rev.json()["id"]
 
-        stu = httpx.post(f"{base_url}/api/v1/admin/users", json={"username": f"rv_stu_{uid}", "password": "RvStu@2026!", "role": "STUDENT", "is_active": True, "org_id": org_id}, headers=auth_headers, timeout=10)
+        stu = httpx.post(f"{base_url}/api/v1/admin/users", json={"username": f"rv_stu_{uid}", "password": "RvStu@2026!!", "role": "STUDENT", "is_active": True, "org_id": org_id}, headers=auth_headers, timeout=10)
         assert stu.status_code == 200, stu.text
         stu_id = stu.json()["id"]
 
@@ -1369,12 +1369,12 @@ def test_review_round_lifecycle(base_url: str, auth_headers: dict) -> None:
         rev_scope_id = rev_scope.json()["id"]
 
         # Enroll student
-        stu_hdrs = _login_as(base_url, f"rv_stu_{uid}", "RvStu@2026!")
+        stu_hdrs = _login_as(base_url, f"rv_stu_{uid}", "RvStu@2026!!")
         enr = httpx.post(f"{base_url}/api/v1/registration/enroll", json={"section_id": section_id}, headers={**stu_hdrs, "Idempotency-Key": f"rv-enr-{uid}"}, timeout=10)
         assert enr.status_code == 200, enr.text
 
         inst_hdrs = _login_as(base_url, f"rv_inst_{uid}", "RvInst@2026!")
-        rev_hdrs = _login_as(base_url, f"rv_rev_{uid}", "RvRev@2026!")
+        rev_hdrs = _login_as(base_url, f"rv_rev_{uid}", "RvRev@2026!!")
 
         # POST /reviews/forms
         form = httpx.post(
@@ -1589,7 +1589,7 @@ def test_review_auto_assign_and_recheck_lifecycle(base_url: str, auth_headers: d
 
         stu = httpx.post(
             f"{base_url}/api/v1/admin/users",
-            json={"username": f"au_stu_{uid}", "password": "AuStu@2026!",
+            json={"username": f"au_stu_{uid}", "password": "AuStu@2026!!",
                   "role": "STUDENT", "is_active": True, "org_id": org_id},
             headers=auth_headers, timeout=10,
         )
@@ -1622,7 +1622,7 @@ def test_review_auto_assign_and_recheck_lifecycle(base_url: str, auth_headers: d
         rev2_scope_id = rev2_scope.json()["id"]
 
         # Enrol student (required for assignment eligibility and recheck creation)
-        stu_hdrs = _login_as(base_url, f"au_stu_{uid}", "AuStu@2026!")
+        stu_hdrs = _login_as(base_url, f"au_stu_{uid}", "AuStu@2026!!")
         enroll = httpx.post(
             f"{base_url}/api/v1/registration/enroll",
             json={"section_id": section_id},

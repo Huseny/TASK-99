@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -94,10 +96,13 @@ def enroll(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     _require_student(user)
-    if not idempotency_key:
-        raise HTTPException(status_code=400, detail="Idempotency-Key header is required.")
+    # Idempotency-Key is optional: when a client provides one they get
+    # at-most-once semantics via cached-response replay; when they don't, we
+    # mint a fresh key so the request can still proceed. Race-safety still
+    # relies on row-level locking inside `registration_service.enroll`.
+    key = idempotency_key or f"auto-{uuid.uuid4().hex}"
     require_section_access(db, user, payload.section_id)
-    code, response = registration_service.enroll(db, user, payload.section_id, idempotency_key)
+    code, response = registration_service.enroll(db, user, payload.section_id, key)
     return JSONResponse(content=response, status_code=code)
 
 
@@ -116,10 +121,9 @@ def drop(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     _require_student(user)
-    if not idempotency_key:
-        raise HTTPException(status_code=400, detail="Idempotency-Key header is required.")
+    key = idempotency_key or f"auto-{uuid.uuid4().hex}"
     require_section_access(db, user, payload.section_id)
-    code, response = registration_service.drop(db, user, payload.section_id, idempotency_key)
+    code, response = registration_service.drop(db, user, payload.section_id, key)
     return JSONResponse(content=response, status_code=code)
 
 

@@ -17,6 +17,7 @@ from app.models.review import (
     ReviewRound,
     ReviewerAssignment,
     Score,
+    ScoringForm,
 )
 from app.models.user import SessionToken, User, UserRole
 from app.schemas.admin import (
@@ -143,12 +144,103 @@ def update_organization(
     return OrganizationOut(**after)
 
 
+def _purge_organization_dependencies(db: Session, organization_id: int) -> None:
+    """Cascade-clean every row whose existence would block
+    ``DELETE FROM organizations``.  Handles the full teaching subtree rooted
+    at the org: scoring forms, integration clients, terms → registration
+    rounds, courses → sections → all downstream registration/review/finance
+    artefacts.
+    """
+    sync = {"synchronize_session": False}
+
+    # Integration clients: nullable FK — keep the client record but detach.
+    db.query(IntegrationClient).filter(
+        IntegrationClient.organization_id == organization_id
+    ).update({"organization_id": None}, **sync)
+
+    # Collect dependent section / term / course / review_round ids once.
+    section_ids = [
+        sid for (sid,) in (
+            db.query(Section.id)
+            .join(Course, Section.course_id == Course.id)
+            .filter(Course.organization_id == organization_id)
+            .all()
+        )
+    ]
+    section_ids_via_term = [
+        sid for (sid,) in (
+            db.query(Section.id)
+            .join(Term, Section.term_id == Term.id)
+            .filter(Term.organization_id == organization_id)
+            .all()
+        )
+    ]
+    section_ids = list({*section_ids, *section_ids_via_term})
+    term_ids = [tid for (tid,) in db.query(Term.id).filter(Term.organization_id == organization_id).all()]
+    course_ids = [cid for (cid,) in db.query(Course.id).filter(Course.organization_id == organization_id).all()]
+
+    review_round_ids: list[int] = []
+    if section_ids:
+        review_round_ids = [
+            rid for (rid,) in db.query(ReviewRound.id).filter(ReviewRound.section_id.in_(section_ids)).all()
+        ]
+
+    # Review-scoring graph scoped to these sections / rounds.
+    if section_ids:
+        assignment_ids = [
+            aid for (aid,) in db.query(ReviewerAssignment.id)
+            .filter(ReviewerAssignment.section_id.in_(section_ids))
+            .all()
+        ]
+        score_ids = []
+        if assignment_ids:
+            score_ids = [
+                sid for (sid,) in db.query(Score.id).filter(Score.assignment_id.in_(assignment_ids)).all()
+            ]
+        if score_ids:
+            db.query(OutlierFlag).filter(OutlierFlag.score_id.in_(score_ids)).delete(**sync)
+            db.query(Score).filter(Score.id.in_(score_ids)).delete(**sync)
+        if review_round_ids:
+            db.query(OutlierFlag).filter(OutlierFlag.round_id.in_(review_round_ids)).delete(**sync)
+        if assignment_ids:
+            db.query(ReviewerAssignment).filter(
+                ReviewerAssignment.id.in_(assignment_ids)
+            ).delete(**sync)
+        db.query(RecheckRequest).filter(RecheckRequest.section_id.in_(section_ids)).delete(**sync)
+
+        # Registration-domain rows attached to these sections.
+        db.query(Enrollment).filter(Enrollment.section_id.in_(section_ids)).delete(**sync)
+        db.query(WaitlistEntry).filter(WaitlistEntry.section_id.in_(section_ids)).delete(**sync)
+        db.query(RegistrationHistory).filter(
+            RegistrationHistory.section_id.in_(section_ids)
+        ).delete(**sync)
+
+    # Review rounds (scoped by section) and registration rounds (scoped by term).
+    if review_round_ids:
+        db.query(ReviewRound).filter(ReviewRound.id.in_(review_round_ids)).delete(**sync)
+    if term_ids:
+        db.query(RegistrationRound).filter(RegistrationRound.term_id.in_(term_ids)).delete(**sync)
+
+    # Sections → courses → terms. Sections first because they FK both.
+    if section_ids:
+        db.query(Section).filter(Section.id.in_(section_ids)).delete(**sync)
+    if course_ids:
+        db.query(Course).filter(Course.id.in_(course_ids)).delete(**sync)
+    if term_ids:
+        db.query(Term).filter(Term.id.in_(term_ids)).delete(**sync)
+
+    # Scoring forms (org-scoped, nullable org_id — safe to delete org-owned
+    # forms; shared/global forms have organization_id IS NULL and survive).
+    db.query(ScoringForm).filter(ScoringForm.organization_id == organization_id).delete(**sync)
+
+
 @router.delete("/organizations/{organization_id}")
 def delete_organization(organization_id: int, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     entity = db.query(Organization).filter(Organization.id == organization_id).first()
     if entity is None:
         raise HTTPException(status_code=404, detail="Organization not found.")
     before = _to_dict(entity, ["id", "name", "code", "is_active"])
+    _purge_organization_dependencies(db, organization_id)
     db.delete(entity)
     write_audit_log(
         db,

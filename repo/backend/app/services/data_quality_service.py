@@ -46,11 +46,12 @@ def _domain_candidate_values(db: Session, entity_type: str, key: str, payload: d
         rows = query.all()
         return [str(row[0]) for row in rows if row[0]]
     if entity_type == "AdminUserWrite" and key == "username":
-        query = db.query(User.username)
-        if payload.get("existing_entity_id") is not None:
-            query = query.filter(User.id != payload["existing_entity_id"])
-        rows = query.all()
-        return [str(row[0]) for row in rows if row[0]]
+        # Usernames are deterministic identifiers where only exact-match
+        # duplication is meaningful. Two users with similar-looking usernames
+        # (e.g. "au_rv1_abc" vs "au_rv2_abc") are distinct identities, so we
+        # skip similarity scoring here. `_has_authoritative_duplicate` still
+        # enforces exact uniqueness on User.username.
+        return []
     if entity_type in {"ReviewFormWrite", "IntegrationQbankFormWrite"} and key == "name":
         query = db.query(ScoringForm.name)
         org_id = payload.get("organization_id")
@@ -59,8 +60,9 @@ def _domain_candidate_values(db: Session, entity_type: str, key: str, payload: d
         rows = query.all()
         return [str(row[0]) for row in rows if row[0]]
     if entity_type == "IntegrationSISStudentWrite" and key == "username":
-        rows = db.query(User.username).filter(User.org_id == payload.get("org_id")).all()
-        return [str(row[0]) for row in rows if row[0]]
+        # Same rationale as AdminUserWrite.username — exact match is the only
+        # meaningful uniqueness check for identifiers.
+        return []
     return []
 
 
@@ -164,8 +166,17 @@ def evaluate_payload(
         reasons.append("Duplicate record detected")
         score -= 20
 
+    # Similarity-based dedup is only meaningful for free-text fields like
+    # course titles or form names. For deterministic identifiers (usernames)
+    # only exact-match uniqueness is enforced — see _domain_candidate_values.
+    identifier_keys = {
+        ("AdminUserWrite", "username"),
+        ("IntegrationSISStudentWrite", "username"),
+    }
     for key in unique_keys:
         if key not in payload:
+            continue
+        if (entity_type, key) in identifier_keys:
             continue
         value = str(payload[key])
         authoritative_candidates = _domain_candidate_values(db, entity_type, key, payload)
