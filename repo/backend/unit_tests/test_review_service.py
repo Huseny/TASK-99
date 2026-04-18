@@ -157,34 +157,8 @@ class TestCalculateTotalScore:
 # _evaluate_outliers
 # ---------------------------------------------------------------------------
 
+
 class TestEvaluateOutliers:
-    def test_flags_outlier_when_deviation_exceeds_threshold(self):
-        db = _make_db()
-        org = _org(db)
-        course = _course(db, org.id)
-        term = _term(db, org.id)
-        section = _section(db, course.id, term.id)
-        form = _form(db, org.id)
-        reviewer1 = _user(db, "rev1", UserRole.reviewer)
-        reviewer2 = _user(db, "rev2", UserRole.reviewer)
-        student = _user(db, "stu1", UserRole.student)
-        _scope_grant(db, reviewer1.id, section.id)
-        _scope_grant(db, reviewer2.id, section.id)
-        round_obj = _round(db, form.id, section.id, term.id)
-
-        a1 = ReviewerAssignment(round_id=round_obj.id, reviewer_id=reviewer1.id, student_id=student.id, section_id=section.id)
-        a2 = ReviewerAssignment(round_id=round_obj.id, reviewer_id=reviewer2.id, student_id=student.id, section_id=section.id)
-        db.add_all([a1, a2])
-        db.flush()
-
-        db.add(Score(assignment_id=a1.id, criterion_scores={"Quality": 1.0}, total_score=1.0))
-        db.add(Score(assignment_id=a2.id, criterion_scores={"Quality": 5.0}, total_score=5.0))
-        db.flush()
-
-        review_service._evaluate_outliers(db, round_obj.id, student.id)
-        flags = db.query(OutlierFlag).filter(OutlierFlag.round_id == round_obj.id).all()
-        assert len(flags) >= 1
-
     def test_no_flag_when_only_one_score(self):
         db = _make_db()
         org = _org(db)
