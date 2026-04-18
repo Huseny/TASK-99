@@ -53,7 +53,7 @@ class ReviewRound(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     term_id: Mapped[int] = mapped_column(ForeignKey("terms.id"), nullable=False)
-    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False)
+    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"), nullable=False)
     scoring_form_id: Mapped[int] = mapped_column(ForeignKey("scoring_forms.id"), nullable=False)
     identity_mode: Mapped[IdentityMode] = mapped_column(_enum_column(IdentityMode), nullable=False, default=IdentityMode.blind)
     status: Mapped[ReviewRoundStatus] = mapped_column(_enum_column(ReviewRoundStatus), nullable=False, default=ReviewRoundStatus.draft)
@@ -66,10 +66,10 @@ class ReviewerAssignment(Base):
     __table_args__ = (UniqueConstraint("round_id", "reviewer_id", "student_id", name="uq_assignment_round_reviewer_student"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    round_id: Mapped[int] = mapped_column(ForeignKey("review_rounds.id"), nullable=False, index=True)
+    round_id: Mapped[int] = mapped_column(ForeignKey("review_rounds.id", ondelete="CASCADE"), nullable=False, index=True)
     reviewer_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False)
+    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"), nullable=False)
     assigned_manually: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -79,7 +79,7 @@ class Score(Base):
     __table_args__ = (UniqueConstraint("assignment_id", name="uq_score_assignment"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    assignment_id: Mapped[int] = mapped_column(ForeignKey("reviewer_assignments.id"), nullable=False, index=True)
+    assignment_id: Mapped[int] = mapped_column(ForeignKey("reviewer_assignments.id", ondelete="CASCADE"), nullable=False, index=True)
     criterion_scores: Mapped[dict] = mapped_column(JSON, nullable=False)
     total_score: Mapped[float] = mapped_column(Float, nullable=False)
     comment: Mapped[str] = mapped_column(Text, nullable=True)
@@ -90,9 +90,9 @@ class OutlierFlag(Base):
     __tablename__ = "outlier_flags"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    round_id: Mapped[int] = mapped_column(ForeignKey("review_rounds.id"), nullable=False, index=True)
+    round_id: Mapped[int] = mapped_column(ForeignKey("review_rounds.id", ondelete="CASCADE"), nullable=False, index=True)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    score_id: Mapped[int] = mapped_column(ForeignKey("scores.id"), nullable=False)
+    score_id: Mapped[int] = mapped_column(ForeignKey("scores.id", ondelete="CASCADE"), nullable=False)
     median_score: Mapped[float] = mapped_column(Float, nullable=False)
     deviation: Mapped[float] = mapped_column(Float, nullable=False)
     resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -103,9 +103,9 @@ class RecheckRequest(Base):
     __tablename__ = "recheck_requests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    round_id: Mapped[int] = mapped_column(ForeignKey("review_rounds.id"), nullable=False)
+    round_id: Mapped[int] = mapped_column(ForeignKey("review_rounds.id", ondelete="CASCADE"), nullable=False)
     student_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id"), nullable=False)
+    section_id: Mapped[int] = mapped_column(ForeignKey("sections.id", ondelete="CASCADE"), nullable=False)
     requested_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[RecheckStatus] = mapped_column(_enum_column(RecheckStatus), nullable=False, default=RecheckStatus.requested)

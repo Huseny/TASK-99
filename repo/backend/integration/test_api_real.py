@@ -1290,7 +1290,7 @@ def test_data_quality_quarantine_and_report(base_url: str, auth_headers: dict) -
         # PATCH /data-quality/quarantine/{id}/resolve
         resolve = httpx.patch(
             f"{base_url}/api/v1/data-quality/quarantine/{quarantine_id}/resolve",
-            json={"resolution": "Rejected – validation failure"},
+            json={"action": "DISCARD"},
             headers=auth_headers,
             timeout=10,
         )
