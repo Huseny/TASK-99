@@ -27,6 +27,7 @@ class PaymentInstrument(str, enum.Enum):
     cash = "CASH"
     check = "CHECK"
     internal_transfer = "INTERNAL_TRANSFER"
+    bank_transfer = "BANK_TRANSFER"
 
 
 class LedgerAccount(Base):

@@ -57,7 +57,7 @@ class ReviewRound(Base):
     scoring_form_id: Mapped[int] = mapped_column(ForeignKey("scoring_forms.id"), nullable=False)
     identity_mode: Mapped[IdentityMode] = mapped_column(_enum_column(IdentityMode), nullable=False, default=IdentityMode.blind)
     status: Mapped[ReviewRoundStatus] = mapped_column(_enum_column(ReviewRoundStatus), nullable=False, default=ReviewRoundStatus.draft)
-    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
