@@ -7,6 +7,17 @@ from app.core.database import get_db
 from app.core.security import hash_password, validate_password_complexity
 from app.models.access import ScopeGrant, ScopeType
 from app.models.admin import AuditLog, Course, Organization, RegistrationRound, Section, Term
+from app.models.finance import BankStatementLine, LedgerAccount, LedgerEntry
+from app.models.integration import IntegrationClient
+from app.models.messaging import Notification, NotificationLog, NotificationSchedule
+from app.models.registration import AddDropRequest, Enrollment, RegistrationHistory, WaitlistEntry
+from app.models.review import (
+    OutlierFlag,
+    RecheckRequest,
+    ReviewRound,
+    ReviewerAssignment,
+    Score,
+)
 from app.models.user import SessionToken, User, UserRole
 from app.schemas.admin import (
     AuditRetentionRunOut,
@@ -382,6 +393,119 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(require_admin)):
     ]
 
 
+def _purge_user_dependencies(db: Session, user_id: int) -> None:
+    """Remove or null-out every row that references this user so the
+    subsequent ``DELETE FROM users`` does not violate FK constraints.
+
+    - Nullable FK columns (audit trail, org graph) are set to NULL so history
+      is preserved with an anonymous actor.
+    - User-scoped transactional rows (enrollments, ledger, notifications,
+      reviewer assignments, etc.) are hard-deleted, child-first, to avoid
+      dangling references.
+    """
+    sync = {"synchronize_session": False}
+
+    # 1. Null out nullable references so history/structure is preserved.
+    db.query(Section).filter(Section.instructor_id == user_id).update(
+        {"instructor_id": None}, **sync
+    )
+    db.query(User).filter(User.reports_to == user_id).update(
+        {"reports_to": None}, **sync
+    )
+    db.query(ReviewRound).filter(ReviewRound.created_by == user_id).update(
+        {"created_by": None}, **sync
+    )
+    db.query(IntegrationClient).filter(IntegrationClient.actor_user_id == user_id).update(
+        {"actor_user_id": None}, **sync
+    )
+    db.query(RecheckRequest).filter(RecheckRequest.assigned_reviewer_id == user_id).update(
+        {"assigned_reviewer_id": None}, **sync
+    )
+    db.query(AuditLog).filter(AuditLog.actor_id == user_id).update(
+        {"actor_id": None}, **sync
+    )
+
+    # 2. Review-scoring graph — collect affected assignment / score ids
+    #    first, then delete child rows before their parents.
+    assignment_ids = [
+        row.id
+        for row in db.query(ReviewerAssignment.id)
+        .filter(
+            (ReviewerAssignment.reviewer_id == user_id)
+            | (ReviewerAssignment.student_id == user_id)
+        )
+        .all()
+    ]
+    score_ids = (
+        [
+            row.id
+            for row in db.query(Score.id)
+            .filter(Score.assignment_id.in_(assignment_ids))
+            .all()
+        ]
+        if assignment_ids
+        else []
+    )
+    db.query(OutlierFlag).filter(OutlierFlag.student_id == user_id).delete(**sync)
+    if score_ids:
+        db.query(OutlierFlag).filter(OutlierFlag.score_id.in_(score_ids)).delete(**sync)
+        db.query(Score).filter(Score.id.in_(score_ids)).delete(**sync)
+    if assignment_ids:
+        db.query(ReviewerAssignment).filter(
+            ReviewerAssignment.id.in_(assignment_ids)
+        ).delete(**sync)
+    db.query(RecheckRequest).filter(
+        (RecheckRequest.student_id == user_id)
+        | (RecheckRequest.requested_by == user_id)
+    ).delete(**sync)
+
+    # 3. Finance ledger — null out bank-statement match references first so
+    #    the FK on matched_entry_id does not block LedgerEntry deletion, then
+    #    delete entries before their parent account.
+    entry_ids = [
+        row.id
+        for row in db.query(LedgerEntry.id)
+        .filter(LedgerEntry.student_id == user_id)
+        .all()
+    ]
+    if entry_ids:
+        db.query(BankStatementLine).filter(
+            BankStatementLine.matched_entry_id.in_(entry_ids)
+        ).update({"matched_entry_id": None, "matched": False}, **sync)
+        db.query(LedgerEntry).filter(LedgerEntry.id.in_(entry_ids)).delete(**sync)
+    db.query(LedgerAccount).filter(LedgerAccount.student_id == user_id).delete(**sync)
+
+    # 4. Registration-domain rows.
+    db.query(Enrollment).filter(Enrollment.student_id == user_id).delete(**sync)
+    db.query(WaitlistEntry).filter(WaitlistEntry.student_id == user_id).delete(**sync)
+    db.query(AddDropRequest).filter(AddDropRequest.actor_id == user_id).delete(**sync)
+    db.query(RegistrationHistory).filter(
+        RegistrationHistory.student_id == user_id
+    ).delete(**sync)
+
+    # 5. Messaging deliveries to this recipient. NotificationLog has an FK
+    #    to Notification, so delete logs before the parent Notifications.
+    notif_ids = [
+        row.id
+        for row in db.query(Notification.id)
+        .filter(Notification.recipient_id == user_id)
+        .all()
+    ]
+    db.query(NotificationLog).filter(NotificationLog.recipient_id == user_id).delete(**sync)
+    if notif_ids:
+        db.query(NotificationLog).filter(
+            NotificationLog.notification_id.in_(notif_ids)
+        ).delete(**sync)
+        db.query(Notification).filter(Notification.id.in_(notif_ids)).delete(**sync)
+    db.query(NotificationSchedule).filter(
+        NotificationSchedule.recipient_id == user_id
+    ).delete(**sync)
+
+    # 6. Access / session data.
+    db.query(ScopeGrant).filter(ScopeGrant.user_id == user_id).delete(**sync)
+    db.query(SessionToken).filter(SessionToken.user_id == user_id).delete(**sync)
+
+
 @router.delete("/users/{user_id}")
 def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     user = db.query(User).filter(User.id == user_id).first()
@@ -389,7 +513,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db), admin: User = Depen
         raise HTTPException(status_code=404, detail="User not found.")
     before = _to_dict(user, ["id", "username", "is_active", "org_id", "reports_to"])
     auth_service.revoke_user_sessions(db, user.id, commit=False)
-    db.query(SessionToken).filter(SessionToken.user_id == user.id).delete(synchronize_session=False)
+    _purge_user_dependencies(db, user.id)
     db.delete(user)
     write_audit_log(db, actor_id=admin.id, action="user.delete", entity_name="User", entity_id=user_id, before=before, after=None)
     db.commit()
